@@ -478,6 +478,10 @@ fn eval_assign_expression(exp: &InfixExpression, right: Object, env: Env) -> Res
                 to_env(&env, name, Object::SLICE(Rc::clone(v)));
                 right
             }
+            (Object::FUNCTION(_), Object::FUNCTION(v)) => {
+                to_env(&env, name, Object::FUNCTION(Rc::clone(v)));
+                right
+            }
             _ => return Err(operation_type_error(&exp.position)),
         })
     } else {
