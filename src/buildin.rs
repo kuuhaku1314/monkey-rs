@@ -1,10 +1,9 @@
 use crate::error::Error;
+use crate::evaluator::BuildInFn;
 use crate::object::Object;
 use std::collections::HashMap;
-use crate::evaluator::BuildInFn;
 
-pub fn new_builtin_function_map() -> HashMap<&'static str, BuildInFn>
-{
+pub fn new_builtin_function_map() -> HashMap<&'static str, BuildInFn> {
     let mut map = HashMap::new();
     map.insert("print", _print as _);
     map.insert("len", _len as _);

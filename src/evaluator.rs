@@ -15,9 +15,8 @@ use std::rc::Rc;
 use std::sync::LazyLock;
 
 pub type BuildInFn = fn(&[Object]) -> Result<Object, Error>;
-pub static BUILD_IN_FUNCTIONS: LazyLock<
-    HashMap<&'static str, BuildInFn>,
-> = LazyLock::new(|| new_builtin_function_map());
+pub static BUILD_IN_FUNCTIONS: LazyLock<HashMap<&'static str, BuildInFn>> =
+    LazyLock::new(|| new_builtin_function_map());
 
 pub fn eval(program: &Program, env: Env) -> Result<Object, Error> {
     eval_statements(&program.statements, true, env)
@@ -97,7 +96,7 @@ fn eval_index_assign_statement(exp: &IndexAssignStatement, env: Env) -> Result<O
                                         "index out of bound At {}:{}",
                                         exp.position.0, exp.position.1
                                     )
-                                        .to_string(),
+                                    .to_string(),
                                 });
                             }
                             vec.borrow_mut()[i as usize] =
@@ -113,7 +112,7 @@ fn eval_index_assign_statement(exp: &IndexAssignStatement, env: Env) -> Result<O
                         "not found variable name '{}' At {}:{}",
                         name.name, name.position.0, name.position.1
                     )
-                        .to_owned(),
+                    .to_owned(),
                 });
             }
         }
@@ -235,7 +234,7 @@ fn eval_identifier(exp: &Identifier, env: Env) -> Result<Object, Error> {
                 "not found variable name '{}' At {}:{}",
                 exp.name, exp.position.0, exp.position.1
             )
-                .to_owned(),
+            .to_owned(),
         })
     }
 }
@@ -300,7 +299,7 @@ fn eval_call_expression(exp: &CallExpression, env: Env) -> Result<Object, Error>
                         "the number of parameter not match At{}:{}",
                         exp.position.0, exp.position.1
                     )
-                        .to_owned(),
+                    .to_owned(),
                 });
             }
             let env = enter_env(Rc::clone(&env));
@@ -350,7 +349,7 @@ fn eval_index_expression(exp: &IndexExpression, env: Env) -> Result<Object, Erro
                         "index out of bound At {}:{}",
                         exp.position.0, exp.position.1
                     )
-                        .to_string(),
+                    .to_string(),
                 })?
                 .to_string(),
         ),
@@ -361,7 +360,7 @@ fn eval_index_expression(exp: &IndexExpression, env: Env) -> Result<Object, Erro
                         "index out of bound At {}:{}",
                         exp.position.0, exp.position.1
                     )
-                        .to_string(),
+                    .to_string(),
                 });
             }
             result.borrow_mut()[i as usize].to_owned()

@@ -215,7 +215,10 @@ impl Parser {
                 // block statement last statement can not semicolon
                 // but cannot determine if this is the last statement here
                 // so need to hand this over to the block statement for inspection
-                if !in_block && self.must_end_of_semicolon(&stmt.expression) && !stmt.end_of_semicolon {
+                if !in_block
+                    && self.must_end_of_semicolon(&stmt.expression)
+                    && !stmt.end_of_semicolon
+                {
                     return Err(self.make_syntax_error(Token::Semicolon));
                 }
                 Ok(Statement::Expression(stmt))

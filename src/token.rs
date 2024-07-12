@@ -173,8 +173,7 @@ impl Token {
     }
 }
 
-pub static KEY_WORDS_TABLE: LazyLock<HashMap<&'static str, Token>> =
-    LazyLock::new(key_words_table);
+pub static KEY_WORDS_TABLE: LazyLock<HashMap<&'static str, Token>> = LazyLock::new(key_words_table);
 
 fn key_words_table() -> HashMap<&'static str, Token> {
     let mut set = HashMap::new();
