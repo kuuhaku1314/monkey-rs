@@ -27,8 +27,8 @@ pub fn new_parser(lexer: Lexer) -> Parser {
     let path = lexer.file_path().to_owned();
     let mut parser = Parser {
         lexer,
-        cur_token: Token::EOF,
-        peek_token: Token::EOF,
+        cur_token: Token::Eof,
+        peek_token: Token::Eof,
         path,
         cur_token_position: Position(0, 0),
         peek_token_position: Position(0, 0),
@@ -41,7 +41,7 @@ pub fn new_parser(lexer: Lexer) -> Parser {
 
     // prefix
     parser.register_prefix(
-        discriminant(&Token::IDENT(String::default())),
+        discriminant(&Token::Ident(String::default())),
         Parser::parse_identifier,
     );
     parser.register_prefix(
@@ -52,43 +52,43 @@ pub fn new_parser(lexer: Lexer) -> Parser {
         discriminant(&Token::FloatLiteral(f64::default())),
         Parser::parse_float_literal,
     );
-    parser.register_prefix(discriminant(&Token::TRUE), Parser::parse_bool_literal);
-    parser.register_prefix(discriminant(&Token::FALSE), Parser::parse_bool_literal);
+    parser.register_prefix(discriminant(&Token::True), Parser::parse_bool_literal);
+    parser.register_prefix(discriminant(&Token::False), Parser::parse_bool_literal);
     parser.register_prefix(
         discriminant(&Token::StringLiteral(String::default())),
         Parser::parse_string_literal,
     );
-    parser.register_prefix(discriminant(&Token::BANG), Parser::parse_prefix_expression);
-    parser.register_prefix(discriminant(&Token::MINUS), Parser::parse_prefix_expression);
+    parser.register_prefix(discriminant(&Token::Bang), Parser::parse_prefix_expression);
+    parser.register_prefix(discriminant(&Token::Minus), Parser::parse_prefix_expression);
     parser.register_prefix(
-        discriminant(&Token::LPAREN),
+        discriminant(&Token::Lparen),
         Parser::parse_grouped_expression,
     );
     parser.register_prefix(discriminant(&Token::IF), Parser::parse_if_expression);
     parser.register_prefix(
-        discriminant(&Token::FUNCTION),
+        discriminant(&Token::Function),
         Parser::parse_function_expression,
     );
-    parser.register_prefix(discriminant(&Token::LBRACE), Parser::parse_map_literal);
-    parser.register_prefix(discriminant(&Token::LBRACKET), Parser::parse_slice_literal);
+    parser.register_prefix(discriminant(&Token::Lbrace), Parser::parse_map_literal);
+    parser.register_prefix(discriminant(&Token::Lbracket), Parser::parse_slice_literal);
     // infix
     parser.register_infix(discriminant(&Token::EQ), Parser::parse_infix_expression);
     parser.register_infix(discriminant(&Token::NotEq), Parser::parse_infix_expression);
     parser.register_infix(discriminant(&Token::LT), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::LTE), Parser::parse_infix_expression);
+    parser.register_infix(discriminant(&Token::Lte), Parser::parse_infix_expression);
     parser.register_infix(discriminant(&Token::GT), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::GTE), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::PLUS), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::MINUS), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::SLASH), Parser::parse_infix_expression);
+    parser.register_infix(discriminant(&Token::Gte), Parser::parse_infix_expression);
+    parser.register_infix(discriminant(&Token::Plus), Parser::parse_infix_expression);
+    parser.register_infix(discriminant(&Token::Minus), Parser::parse_infix_expression);
+    parser.register_infix(discriminant(&Token::Slash), Parser::parse_infix_expression);
     parser.register_infix(
-        discriminant(&Token::ASTERISK),
+        discriminant(&Token::Asterisk),
         Parser::parse_infix_expression,
     );
-    parser.register_infix(discriminant(&Token::ASSIGN), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::LPAREN), Parser::parse_call_expression);
+    parser.register_infix(discriminant(&Token::Assign), Parser::parse_infix_expression);
+    parser.register_infix(discriminant(&Token::Lparen), Parser::parse_call_expression);
     parser.register_infix(
-        discriminant(&Token::LBRACKET),
+        discriminant(&Token::Lbracket),
         Parser::parse_index_expression,
     );
     // prefetch
@@ -99,41 +99,41 @@ pub fn new_parser(lexer: Lexer) -> Parser {
 
 fn token_precedences_map() -> HashMap<Discriminant<Token>, OperationPriority> {
     let mut map = HashMap::new();
-    map.insert(discriminant(&Token::EQ), OperationPriority::EQUALS);
-    map.insert(discriminant(&Token::NotEq), OperationPriority::EQUALS);
-    map.insert(discriminant(&Token::LT), OperationPriority::COMPARE);
-    map.insert(discriminant(&Token::LTE), OperationPriority::COMPARE);
-    map.insert(discriminant(&Token::GT), OperationPriority::COMPARE);
-    map.insert(discriminant(&Token::GTE), OperationPriority::COMPARE);
-    map.insert(discriminant(&Token::PLUS), OperationPriority::SUM);
-    map.insert(discriminant(&Token::MINUS), OperationPriority::SUM);
-    map.insert(discriminant(&Token::SLASH), OperationPriority::PRODUCT);
-    map.insert(discriminant(&Token::ASTERISK), OperationPriority::PRODUCT);
-    map.insert(discriminant(&Token::LPAREN), OperationPriority::CALL);
-    map.insert(discriminant(&Token::ASSIGN), OperationPriority::ASSIGN);
-    map.insert(discriminant(&Token::LBRACKET), OperationPriority::INDEX);
+    map.insert(discriminant(&Token::EQ), OperationPriority::Equals);
+    map.insert(discriminant(&Token::NotEq), OperationPriority::Equals);
+    map.insert(discriminant(&Token::LT), OperationPriority::Compare);
+    map.insert(discriminant(&Token::Lte), OperationPriority::Compare);
+    map.insert(discriminant(&Token::GT), OperationPriority::Compare);
+    map.insert(discriminant(&Token::Gte), OperationPriority::Compare);
+    map.insert(discriminant(&Token::Plus), OperationPriority::Sum);
+    map.insert(discriminant(&Token::Minus), OperationPriority::Sum);
+    map.insert(discriminant(&Token::Slash), OperationPriority::Product);
+    map.insert(discriminant(&Token::Asterisk), OperationPriority::Product);
+    map.insert(discriminant(&Token::Lparen), OperationPriority::Call);
+    map.insert(discriminant(&Token::Assign), OperationPriority::Assign);
+    map.insert(discriminant(&Token::Lbracket), OperationPriority::Index);
     map
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum OperationPriority {
-    LOWEST,
+    Lowest,
     // =
-    ASSIGN,
+    Assign,
     // ==
-    EQUALS,
+    Equals,
     /// >, <, <=, >=
-    COMPARE,
+    Compare,
     /// +
-    SUM,
+    Sum,
     /// *，/
-    PRODUCT,
+    Product,
     /// -x, !
-    PREFIX,
+    Prefix,
     /// // myFunction(X)
-    CALL,
+    Call,
     /// slice[1]
-    INDEX,
+    Index,
 }
 
 impl Parser {
@@ -166,20 +166,20 @@ impl Parser {
         self.precedences_map
             .get(&discriminant(&self.cur_token))
             .cloned()
-            .unwrap_or(OperationPriority::LOWEST)
+            .unwrap_or(OperationPriority::Lowest)
     }
 
     fn peek_token_precedence(&self) -> OperationPriority {
         self.precedences_map
             .get(&discriminant(&self.peek_token))
             .cloned()
-            .unwrap_or(OperationPriority::LOWEST)
+            .unwrap_or(OperationPriority::Lowest)
     }
 
     pub fn parse_program(&mut self) -> Result<Program, Error> {
         let mut program = Program { statements: vec![] };
-        while self.cur_token != Token::EOF {
-            if self.cur_token == Token::SEMICOLON {
+        while self.cur_token != Token::Eof {
+            if self.cur_token == Token::Semicolon {
                 program.statements.push(Statement::Empty(EmptyStatement {
                     position: self.cur_token_position.to_owned(),
                 }));
@@ -202,11 +202,11 @@ impl Parser {
 
     fn _parse_statement(&mut self, in_block: bool) -> Result<Statement, Error> {
         match &self.cur_token {
-            Token::LET => Ok(Statement::Let(self.parse_let_statement()?)),
-            Token::RETURN => Ok(Statement::Return(self.parse_return_statement()?)),
-            Token::LBRACE => Ok(Statement::Block(self.parse_block_statement()?)),
-            Token::WHILE => Ok(Statement::While(self.parse_while_statement()?)),
-            Token::FOR => Ok(Statement::ForIn(self.parse_for_in_statement()?)),
+            Token::Let => Ok(Statement::Let(self.parse_let_statement()?)),
+            Token::Return => Ok(Statement::Return(self.parse_return_statement()?)),
+            Token::Lbrace => Ok(Statement::Block(self.parse_block_statement()?)),
+            Token::While => Ok(Statement::While(self.parse_while_statement()?)),
+            Token::For => Ok(Statement::ForIn(self.parse_for_in_statement()?)),
             _ => {
                 if self.cur_token.is_ident() && self.peek_token.is_lbracket() {
                     return Ok(Statement::IndexAssign(self.parse_index_assign_statement()?));
@@ -215,10 +215,8 @@ impl Parser {
                 // block statement last statement can not semicolon
                 // but cannot determine if this is the last statement here
                 // so need to hand this over to the block statement for inspection
-                if !in_block {
-                    if self.must_end_of_semicolon(&stmt.expression) && !stmt.end_of_semicolon {
-                        return Err(self.make_syntax_error(Token::SEMICOLON));
-                    }
+                if !in_block && self.must_end_of_semicolon(&stmt.expression) && !stmt.end_of_semicolon {
+                    return Err(self.make_syntax_error(Token::Semicolon));
                 }
                 Ok(Statement::Expression(stmt))
             }
@@ -226,10 +224,7 @@ impl Parser {
     }
 
     fn must_end_of_semicolon(&self, expression: &Expression) -> bool {
-        match expression {
-            Expression::Function(_) | Expression::If(_) => false,
-            _ => true,
-        }
+        !matches!(expression, Expression::Function(_) | Expression::If(_))
     }
 
     fn parse_block_statement(&mut self) -> Result<BlockStatement, Error> {
@@ -252,7 +247,7 @@ impl Parser {
             if !self.peek_token.is_rbrace() && !self.peek_token.is_eof() {
                 if let Statement::Expression(ref stmt) = stmt {
                     if self.must_end_of_semicolon(&stmt.expression) && !stmt.end_of_semicolon {
-                        return Err(self.make_syntax_error(Token::SEMICOLON));
+                        return Err(self.make_syntax_error(Token::Semicolon));
                     }
                 }
             }
@@ -272,7 +267,7 @@ impl Parser {
         debug_assert!(self.cur_token.is_let());
         let position = self.cur_token_position.to_owned();
         if !self.expect_peek(self.peek_token.is_ident()) {
-            return Err(self.make_syntax_error(Token::IDENT(String::default())));
+            return Err(self.make_syntax_error(Token::Ident(String::default())));
         }
         let name = Identifier {
             position: self.cur_token_position.to_owned(),
@@ -280,16 +275,16 @@ impl Parser {
             name: self.cur_token.literal(),
         };
         if !self.expect_peek(self.peek_token.is_assign()) {
-            return Err(self.make_syntax_error(Token::ASSIGN));
+            return Err(self.make_syntax_error(Token::Assign));
         }
         self.next_token();
         let stmt = LetStatement {
             position,
             name,
-            value: self.parse_expression(OperationPriority::LOWEST)?,
+            value: self.parse_expression(OperationPriority::Lowest)?,
         };
         if !self.expect_peek(self.peek_token.is_semicolon()) {
-            return Err(self.make_syntax_error(Token::SEMICOLON));
+            return Err(self.make_syntax_error(Token::Semicolon));
         }
         Ok(stmt)
     }
@@ -300,10 +295,10 @@ impl Parser {
         self.next_token();
         let stmt = ReturnStatement {
             position,
-            value: self.parse_expression(OperationPriority::LOWEST)?,
+            value: self.parse_expression(OperationPriority::Lowest)?,
         };
         if !self.expect_peek(self.peek_token.is_semicolon()) {
-            return Err(self.make_syntax_error(Token::SEMICOLON));
+            return Err(self.make_syntax_error(Token::Semicolon));
         }
         Ok(stmt)
     }
@@ -312,9 +307,9 @@ impl Parser {
         debug_assert!(self.cur_token.is_while());
         let position = self.cur_token_position.to_owned();
         self.next_token();
-        let condition = self.parse_expression(OperationPriority::LOWEST)?;
+        let condition = self.parse_expression(OperationPriority::Lowest)?;
         if !self.expect_peek(self.peek_token.is_lbrace()) {
-            return Err(self.make_syntax_error(Token::LBRACE));
+            return Err(self.make_syntax_error(Token::Lbrace));
         }
         let consequence = self.parse_block_statement()?;
         Ok(WhileStatement {
@@ -328,7 +323,7 @@ impl Parser {
         debug_assert!(self.cur_token.is_for());
         let position = self.cur_token_position.to_owned();
         self.next_token();
-        let key = match self.parse_expression(OperationPriority::LOWEST)? {
+        let key = match self.parse_expression(OperationPriority::Lowest)? {
             Expression::Identifier(ident) => ident,
             _ => {
                 return Err(make_error(format!(
@@ -340,7 +335,7 @@ impl Parser {
         let mut value = None;
         if self.expect_peek(self.peek_token.is_comma()) {
             self.next_token();
-            value = Some(match self.parse_expression(OperationPriority::LOWEST)? {
+            value = Some(match self.parse_expression(OperationPriority::Lowest)? {
                 Expression::Identifier(ident) => ident,
                 _ => {
                     return Err(make_error(format!(
@@ -354,9 +349,9 @@ impl Parser {
             return Err(self.make_syntax_error(Token::IN));
         }
         self.next_token();
-        let collection = self.parse_expression(OperationPriority::LOWEST)?;
+        let collection = self.parse_expression(OperationPriority::Lowest)?;
         if !self.expect_peek(self.peek_token.is_lbrace()) {
-            return Err(self.make_syntax_error(Token::LBRACE));
+            return Err(self.make_syntax_error(Token::Lbrace));
         }
         Ok(ForInStatement {
             position,
@@ -370,7 +365,7 @@ impl Parser {
     fn parse_expression_statement(&mut self) -> Result<ExpressionStatement, Error> {
         let stmt = ExpressionStatement {
             position: self.cur_token_position.to_owned(),
-            expression: self.parse_expression(OperationPriority::LOWEST)?,
+            expression: self.parse_expression(OperationPriority::Lowest)?,
             end_of_semicolon: self.expect_peek(self.peek_token.is_semicolon()),
         };
         Ok(stmt)
@@ -380,19 +375,19 @@ impl Parser {
         debug_assert!(self.cur_token.is_ident());
         let position = self.cur_token_position.to_owned();
         // priority should be >= '['
-        let left = self.parse_expression(OperationPriority::INDEX)?;
+        let left = self.parse_expression(OperationPriority::Index)?;
         self.next_token();
         debug_assert!(self.cur_token.is_lbracket());
         self.next_token();
-        let index = self.parse_expression(OperationPriority::LOWEST)?;
+        let index = self.parse_expression(OperationPriority::Lowest)?;
         if !self.expect_peek(self.peek_token.is_rbracket()) {
-            return Err(self.make_syntax_error(Token::RBRACKET));
+            return Err(self.make_syntax_error(Token::Rbracket));
         }
         if !self.expect_peek(self.peek_token.is_assign()) {
-            return Err(self.make_syntax_error(Token::ASSIGN));
+            return Err(self.make_syntax_error(Token::Assign));
         }
         self.next_token();
-        let right = self.parse_expression(OperationPriority::LOWEST)?;
+        let right = self.parse_expression(OperationPriority::Lowest)?;
         Ok(IndexAssignStatement {
             position,
             left,
@@ -420,7 +415,7 @@ impl Parser {
             (
                 (precedence.to_owned() as u8) < self.peek_token_precedence() as u8 ||
                 // if is assign, from right to left
-                (precedence.to_owned() == self.peek_token_precedence() && self.peek_token_precedence() == OperationPriority::ASSIGN)
+                (precedence == self.peek_token_precedence() && self.peek_token_precedence() == OperationPriority::Assign)
             )
         {
             let func = self
@@ -444,7 +439,7 @@ impl Parser {
         }
         self.next_token();
         if !self.cur_token.is_ident() {
-            return Err(self.make_syntax_error(Token::IDENT(String::default())));
+            return Err(self.make_syntax_error(Token::Ident(String::default())));
         }
         let ident = Identifier {
             position: self.cur_token_position.to_owned(),
@@ -456,7 +451,7 @@ impl Parser {
             self.next_token();
             self.next_token();
             if !self.cur_token.is_ident() {
-                return Err(self.make_syntax_error(Token::IDENT(String::default())));
+                return Err(self.make_syntax_error(Token::Ident(String::default())));
             }
             let ident = Identifier {
                 position: self.cur_token_position.to_owned(),
@@ -466,7 +461,7 @@ impl Parser {
             identifiers.push(ident);
         }
         if !self.expect_peek(self.peek_token.is_rparen()) {
-            return Err(self.make_syntax_error(Token::RPAREN));
+            return Err(self.make_syntax_error(Token::Rparen));
         }
         Ok(identifiers)
     }
@@ -479,14 +474,14 @@ impl Parser {
             return Ok(args);
         }
         self.next_token();
-        args.push(self.parse_expression(OperationPriority::LOWEST)?);
+        args.push(self.parse_expression(OperationPriority::Lowest)?);
         while self.peek_token.is_comma() {
             self.next_token();
             self.next_token();
-            args.push(self.parse_expression(OperationPriority::LOWEST)?);
+            args.push(self.parse_expression(OperationPriority::Lowest)?);
         }
         if !self.expect_peek(self.peek_token.is_rparen()) {
-            return Err(self.make_syntax_error(Token::RPAREN));
+            return Err(self.make_syntax_error(Token::Rparen));
         }
         Ok(args)
     }
@@ -534,7 +529,7 @@ impl Parser {
             position: p.cur_token_position.to_owned(),
             token: p.cur_token.to_owned(),
             name: match p.cur_token {
-                Token::IDENT(ref v) => v.to_owned(),
+                Token::Ident(ref v) => v.to_owned(),
                 _ => unreachable!(),
             },
         }))
@@ -592,7 +587,7 @@ impl Parser {
         Ok(Expression::Prefix(Box::new(PrefixExpression {
             position,
             token,
-            right: p.parse_expression(OperationPriority::PREFIX)?,
+            right: p.parse_expression(OperationPriority::Prefix)?,
         })))
     }
 
@@ -612,9 +607,9 @@ impl Parser {
     fn parse_grouped_expression(p: &mut Parser) -> Result<Expression, Error> {
         debug_assert!(p.cur_token.is_lparen());
         p.next_token();
-        let exp = p.parse_expression(OperationPriority::LOWEST)?;
+        let exp = p.parse_expression(OperationPriority::Lowest)?;
         if !p.expect_peek(p.peek_token.is_rparen()) {
-            Err(p.make_syntax_error(Token::RPAREN))
+            Err(p.make_syntax_error(Token::Rparen))
         } else {
             Ok(exp)
         }
@@ -624,9 +619,9 @@ impl Parser {
         debug_assert!(p.cur_token.is_if());
         let position = p.cur_token_position.to_owned();
         p.next_token();
-        let condition = p.parse_expression(OperationPriority::LOWEST)?;
+        let condition = p.parse_expression(OperationPriority::Lowest)?;
         if !p.expect_peek(p.peek_token.is_lbrace()) {
-            return Err(p.make_syntax_error(Token::LBRACE));
+            return Err(p.make_syntax_error(Token::Lbrace));
         }
         let consequence = p.parse_block_statement()?;
         let mut alternative = None;
@@ -637,7 +632,7 @@ impl Parser {
             } else if p.expect_peek(p.peek_token.is_if()) {
                 optional = Some(Box::new(Self::parse_if_expression(p)?));
             } else {
-                return Err(p.make_syntax_error(Token::LBRACE));
+                return Err(p.make_syntax_error(Token::Lbrace));
             }
         }
         Ok(Expression::If(Box::new(IfExpression {
@@ -662,11 +657,11 @@ impl Parser {
             p.next_token();
         }
         if !p.expect_peek(p.peek_token.is_lparen()) {
-            return Err(p.make_syntax_error(Token::LPAREN));
+            return Err(p.make_syntax_error(Token::Lparen));
         }
         let parameters = p.parse_function_parameters()?;
         if !p.expect_peek(p.peek_token.is_lbrace()) {
-            return Err(p.make_syntax_error(Token::LBRACE));
+            return Err(p.make_syntax_error(Token::Lbrace));
         }
         let body = p.parse_block_statement()?;
         Ok(Expression::Function(FunctionLiteral {
@@ -692,17 +687,15 @@ impl Parser {
         let position = p.cur_token_position.to_owned();
         let mut is_first_loop = true;
         while !p.peek_token.is_rbracket() && !p.peek_token.is_eof() {
-            if !is_first_loop {
-                if !p.expect_peek(p.peek_token.is_comma()) {
-                    return Err(p.make_syntax_error(Token::COMMA));
-                }
+            if !is_first_loop && !p.expect_peek(p.peek_token.is_comma()) {
+                return Err(p.make_syntax_error(Token::Comma));
             }
             p.next_token(); // skip [ or ,
-            elements.push(p.parse_expression(OperationPriority::LOWEST)?);
+            elements.push(p.parse_expression(OperationPriority::Lowest)?);
             is_first_loop = false;
         }
         if !p.expect_peek(p.peek_token.is_rbracket()) {
-            return Err(p.make_syntax_error(Token::RBRACKET));
+            return Err(p.make_syntax_error(Token::Rbracket));
         }
         Ok(Expression::Slice(SliceLiteral { position, elements }))
     }
@@ -713,22 +706,20 @@ impl Parser {
         let position = p.cur_token_position.to_owned();
         let mut is_first_loop = true;
         while !p.peek_token.is_rbrace() && !p.peek_token.is_eof() {
-            if !is_first_loop {
-                if !p.expect_peek(p.peek_token.is_comma()) {
-                    return Err(p.make_syntax_error(Token::COMMA));
-                }
+            if !is_first_loop && !p.expect_peek(p.peek_token.is_comma()) {
+                return Err(p.make_syntax_error(Token::Comma));
             }
             p.next_token(); // skip { or ,
-            let k = p.parse_expression(OperationPriority::LOWEST)?;
+            let k = p.parse_expression(OperationPriority::Lowest)?;
             if !p.expect_peek(p.peek_token.is_colon()) {
-                return Err(p.make_syntax_error(Token::COLON));
+                return Err(p.make_syntax_error(Token::Colon));
             }
             p.next_token(); // skip :
-            kv_pair.push((k, p.parse_expression(OperationPriority::LOWEST)?));
+            kv_pair.push((k, p.parse_expression(OperationPriority::Lowest)?));
             is_first_loop = false;
         }
         if !p.expect_peek(p.peek_token.is_rbrace()) {
-            return Err(p.make_syntax_error(Token::RBRACE));
+            return Err(p.make_syntax_error(Token::Rbrace));
         }
         Ok(Expression::Map(MapLiteral { position, kv_pair }))
     }
@@ -737,9 +728,9 @@ impl Parser {
         debug_assert!(p.cur_token.is_lbracket());
         let position = p.cur_token_position.to_owned();
         p.next_token();
-        let index = p.parse_expression(OperationPriority::INDEX)?;
+        let index = p.parse_expression(OperationPriority::Index)?;
         if !p.expect_peek(p.peek_token.is_rbracket()) {
-            return Err(p.make_syntax_error(Token::RBRACKET));
+            return Err(p.make_syntax_error(Token::Rbracket));
         }
         Ok(Expression::Index(Box::new(IndexExpression {
             position,

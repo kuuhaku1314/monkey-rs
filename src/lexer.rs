@@ -24,7 +24,7 @@ impl From<(usize, usize)> for Position {
 pub fn new_lexer(input: String, path: Option<String>) -> Lexer {
     let unicode = input.chars().collect::<Vec<char>>();
     let mut ch = '\0';
-    if unicode.len() > 0 {
+    if !unicode.is_empty() {
         ch = unicode[0];
     }
     Lexer {
@@ -74,15 +74,15 @@ impl Lexer {
                             self.read_char();
                             Token::EQ
                         }
-                        _ => Token::ASSIGN,
+                        _ => Token::Assign,
                     }
                 }
-                ';' => Token::SEMICOLON,
-                '(' => Token::LPAREN,
-                ')' => Token::RPAREN,
-                ',' => Token::COMMA,
-                '+' => Token::PLUS,
-                '-' => Token::MINUS,
+                ';' => Token::Semicolon,
+                '(' => Token::Lparen,
+                ')' => Token::Rparen,
+                ',' => Token::Comma,
+                '+' => Token::Plus,
+                '-' => Token::Minus,
                 '!' => {
                     // note or div
                     match self.look_ahead() {
@@ -90,16 +90,16 @@ impl Lexer {
                             self.read_char();
                             Token::NotEq
                         }
-                        _ => Token::BANG,
+                        _ => Token::Bang,
                     }
                 }
-                '*' => Token::ASTERISK,
+                '*' => Token::Asterisk,
                 '<' => {
                     // note or div
                     match self.look_ahead() {
                         Some('=') => {
                             self.read_char();
-                            Token::LTE
+                            Token::Lte
                         }
                         _ => Token::LT,
                     }
@@ -109,22 +109,22 @@ impl Lexer {
                     match self.look_ahead() {
                         Some('=') => {
                             self.read_char();
-                            Token::GTE
+                            Token::Gte
                         }
                         _ => Token::GT,
                     }
                 }
-                '{' => Token::LBRACE,
-                '}' => Token::RBRACE,
-                '[' => Token::LBRACKET,
-                ']' => Token::RBRACKET,
-                ':' => Token::COLON,
+                '{' => Token::Lbrace,
+                '}' => Token::Rbrace,
+                '[' => Token::Lbracket,
+                ']' => Token::Rbracket,
+                ':' => Token::Colon,
                 '\0' => {
                     // stream end or invalid token
                     if self.is_stream_eof() {
-                        Token::EOF
+                        Token::Eof
                     } else {
-                        Token::ILLEGAL(
+                        Token::Illegal(
                             '\0'.to_string(),
                             Error {
                                 msg: format!("invalid eof char at {}", self.cur_position_msg()),
@@ -139,7 +139,7 @@ impl Lexer {
                             _ = self.read_note();
                             continue;
                         }
-                        _ => Token::SLASH,
+                        _ => Token::Slash,
                     }
                 }
                 '"' => self.read_string(), // string
@@ -156,7 +156,7 @@ impl Lexer {
                     } else if is_digit(other) {
                         self.read_number()
                     } else {
-                        let token = Token::ILLEGAL(
+                        let token = Token::Illegal(
                             other.to_string(),
                             Error {
                                 msg: format!(
@@ -186,7 +186,7 @@ impl Lexer {
     }
 
     fn is_stream_eof(&self) -> bool {
-        return self.read_position >= self.position && self.ch == '\0';
+        self.read_position >= self.position && self.ch == '\0'
     }
 
     fn next_line(&mut self) {
@@ -233,7 +233,7 @@ impl Lexer {
         KEY_WORDS_TABLE
             .get(str.as_str())
             .cloned()
-            .unwrap_or(Token::IDENT(str))
+            .unwrap_or(Token::Ident(str))
     }
 
     fn read_number(&mut self) -> Token {
@@ -251,7 +251,7 @@ impl Lexer {
         if has_dot {
             match str.parse::<f64>() {
                 Ok(num) => Token::FloatLiteral(num),
-                Err(_) => Token::ILLEGAL(
+                Err(_) => Token::Illegal(
                     str.to_owned(),
                     Error {
                         msg: format!("invalid float {} at {}", str, self.cur_position_msg()),
@@ -261,7 +261,7 @@ impl Lexer {
         } else {
             match str.parse::<i64>() {
                 Ok(num) => Token::IntLiteral(num),
-                Err(_) => Token::ILLEGAL(
+                Err(_) => Token::Illegal(
                     str.to_owned(),
                     Error {
                         msg: format!("invalid float {} at {}", str, self.cur_position_msg()),
@@ -287,7 +287,7 @@ impl Lexer {
                 // handle escape char
                 match self.look_ahead() {
                     None => {
-                        return Token::ILLEGAL(
+                        return Token::Illegal(
                             ch.to_string(),
                             Error {
                                 msg: format!(
@@ -307,7 +307,7 @@ impl Lexer {
                             '"' => str.push('"'),
                             '0' => str.push('\0'),
                             _ => {
-                                return Token::ILLEGAL(
+                                return Token::Illegal(
                                     format!("\\{}", ch),
                                     Error {
                                         msg: format!(
@@ -329,7 +329,7 @@ impl Lexer {
             break;
         }
         if self.is_stream_eof() {
-            return Token::ILLEGAL(
+            return Token::Illegal(
                 format!("\"{}", str),
                 Error {
                     msg: format!(
@@ -361,11 +361,11 @@ impl Lexer {
 }
 
 fn is_letter(ch: char) -> bool {
-    ('a' <= ch && ch <= 'z') || ('A' <= ch && ch <= 'Z') || ch == '_'
+    ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch == '_'
 }
 
 fn is_digit(ch: char) -> bool {
-    '0' <= ch && ch <= '9'
+    ch.is_ascii_digit()
 }
 
 #[cfg(test)]
@@ -377,34 +377,34 @@ mod tests {
     fn test_next_token() {
         let input = String::from("let apple_number = 3;\n\n// test note! \n  let fruit[2]\n =\t  {3.1 ,0}  ; let name = \"\\n\\\"小王\" ;// ");
         let mut lexer = new_lexer(input, None);
-        assert_eq!(lexer.next_token(), Token::LET);
+        assert_eq!(lexer.next_token(), Token::Let);
         assert_eq!(
             lexer.next_token(),
-            Token::IDENT(String::from("apple_number"))
+            Token::Ident(String::from("apple_number"))
         );
-        assert_eq!(lexer.next_token(), Token::ASSIGN);
+        assert_eq!(lexer.next_token(), Token::Assign);
         assert_eq!(lexer.next_token(), Token::IntLiteral(3));
-        assert_eq!(lexer.next_token(), Token::SEMICOLON);
-        assert_eq!(lexer.next_token(), Token::LET);
-        assert_eq!(lexer.next_token(), Token::IDENT(String::from("fruit")));
-        assert_eq!(lexer.next_token(), Token::LBRACKET);
+        assert_eq!(lexer.next_token(), Token::Semicolon);
+        assert_eq!(lexer.next_token(), Token::Let);
+        assert_eq!(lexer.next_token(), Token::Ident(String::from("fruit")));
+        assert_eq!(lexer.next_token(), Token::Lbracket);
         assert_eq!(lexer.next_token(), Token::IntLiteral(2));
-        assert_eq!(lexer.next_token(), Token::RBRACKET);
-        assert_eq!(lexer.next_token(), Token::ASSIGN);
-        assert_eq!(lexer.next_token(), Token::LBRACE);
+        assert_eq!(lexer.next_token(), Token::Rbracket);
+        assert_eq!(lexer.next_token(), Token::Assign);
+        assert_eq!(lexer.next_token(), Token::Lbrace);
         assert_eq!(lexer.next_token(), Token::FloatLiteral(3.1));
-        assert_eq!(lexer.next_token(), Token::COMMA);
+        assert_eq!(lexer.next_token(), Token::Comma);
         assert_eq!(lexer.next_token(), Token::IntLiteral(0));
-        assert_eq!(lexer.next_token(), Token::RBRACE);
-        assert_eq!(lexer.next_token(), Token::SEMICOLON);
-        assert_eq!(lexer.next_token(), Token::LET);
-        assert_eq!(lexer.next_token(), Token::IDENT(String::from("name")));
-        assert_eq!(lexer.next_token(), Token::ASSIGN);
+        assert_eq!(lexer.next_token(), Token::Rbrace);
+        assert_eq!(lexer.next_token(), Token::Semicolon);
+        assert_eq!(lexer.next_token(), Token::Let);
+        assert_eq!(lexer.next_token(), Token::Ident(String::from("name")));
+        assert_eq!(lexer.next_token(), Token::Assign);
         assert_eq!(
             lexer.next_token(),
             Token::StringLiteral(String::from("\n\"小王"))
         );
-        assert_eq!(lexer.next_token(), Token::SEMICOLON);
-        assert_eq!(lexer.next_token(), Token::EOF);
+        assert_eq!(lexer.next_token(), Token::Semicolon);
+        assert_eq!(lexer.next_token(), Token::Eof);
     }
 }

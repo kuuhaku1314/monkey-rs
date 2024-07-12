@@ -121,7 +121,7 @@ impl LetStatement {
     pub fn string(&self) -> String {
         format!(
             "{} {} = {};",
-            Token::LET.identifier(),
+            Token::Let.identifier(),
             self.name.string(),
             self.value.string()
         )
@@ -136,7 +136,7 @@ pub struct ReturnStatement {
 
 impl ReturnStatement {
     pub fn string(&self) -> String {
-        format!("{} {};", Token::RETURN.identifier(), self.value.string())
+        format!("{} {};", Token::Return.identifier(), self.value.string())
     }
 }
 
@@ -178,14 +178,14 @@ pub struct BlockStatement {
 impl BlockStatement {
     pub fn string(&self) -> String {
         let mut buf = String::new();
-        buf.push_str(Token::LBRACE.identifier());
+        buf.push_str(Token::Lbrace.identifier());
         self.statements.iter().for_each(|statement| {
             buf.push('\n');
             buf.push('\t');
             buf.push_str(statement.string().as_str());
         });
         buf.push('\n');
-        buf.push_str(Token::RBRACE.identifier());
+        buf.push_str(Token::Rbrace.identifier());
         buf
     }
 }
@@ -306,13 +306,13 @@ impl IfExpression {
         buf.push_str(self.consequence.string().as_str());
         if self.alternative.is_some() {
             buf.push(' ');
-            buf.push_str(Token::ELSE.identifier());
+            buf.push_str(Token::Else.identifier());
             buf.push(' ');
             buf.push_str(self.alternative.as_ref().unwrap().string().as_str());
         }
         if self.optional.is_some() {
             buf.push(' ');
-            buf.push_str(Token::ELSE.identifier());
+            buf.push_str(Token::Else.identifier());
             buf.push(' ');
             buf.push_str(self.optional.as_ref().unwrap().string().as_str());
         }
@@ -330,7 +330,7 @@ pub struct WhileStatement {
 impl WhileStatement {
     pub fn string(&self) -> String {
         let mut buf = String::new();
-        buf.push_str(Token::WHILE.identifier());
+        buf.push_str(Token::While.identifier());
         buf.push(' ');
         buf.push_str(self.condition.string().as_str());
         buf.push(' ');
@@ -351,11 +351,11 @@ pub struct ForInStatement {
 impl ForInStatement {
     pub fn string(&self) -> String {
         let mut buf = String::new();
-        buf.push_str(Token::FOR.identifier());
+        buf.push_str(Token::For.identifier());
         buf.push(' ');
         buf.push_str(self.key.string().as_str());
         if self.value.is_some() {
-            buf.push_str(Token::COMMA.identifier());
+            buf.push_str(Token::Comma.identifier());
             buf.push(' ');
             buf.push_str(self.key.string().as_str());
         }
@@ -381,9 +381,9 @@ impl IndexAssignStatement {
     pub fn string(&self) -> String {
         let mut buf = String::new();
         buf.push_str(self.left.string().as_str());
-        buf.push_str(Token::LBRACKET.identifier());
+        buf.push_str(Token::Lbracket.identifier());
         buf.push_str(self.index.string().as_str());
-        buf.push_str(Token::RBRACKET.identifier());
+        buf.push_str(Token::Rbracket.identifier());
         buf.push_str(self.right.string().as_str());
         buf
     }
@@ -400,12 +400,12 @@ pub struct FunctionLiteral {
 impl FunctionLiteral {
     pub fn string(&self) -> String {
         let mut buf = String::new();
-        buf.push_str(Token::FUNCTION.identifier());
+        buf.push_str(Token::Function.identifier());
         buf.push(' ');
         if self.name.is_some() {
             buf.push_str(self.name.as_ref().unwrap().string().as_str());
         }
-        buf.push_str(Token::LPAREN.identifier());
+        buf.push_str(Token::Lparen.identifier());
         buf.push_str(
             self.parameters
                 .iter()
@@ -414,7 +414,7 @@ impl FunctionLiteral {
                 .unwrap_or(String::default())
                 .as_str(),
         );
-        buf.push_str(Token::RPAREN.identifier());
+        buf.push_str(Token::Rparen.identifier());
         buf.push(' ');
         buf.push_str(self.body.string().as_str());
         buf
@@ -432,7 +432,7 @@ impl CallExpression {
     pub fn string(&self) -> String {
         let mut buf = String::new();
         buf.push_str(self.function.string().as_str());
-        buf.push_str(Token::LPAREN.identifier());
+        buf.push_str(Token::Lparen.identifier());
         buf.push_str(
             self.arguments
                 .iter()
@@ -441,7 +441,7 @@ impl CallExpression {
                 .unwrap_or(String::default())
                 .as_str(),
         );
-        buf.push_str(Token::RPAREN.identifier());
+        buf.push_str(Token::Rparen.identifier());
         buf
     }
 }
@@ -455,18 +455,18 @@ pub struct MapLiteral {
 impl MapLiteral {
     pub fn string(&self) -> String {
         let mut buf = String::new();
-        buf.push_str(Token::LBRACE.identifier());
+        buf.push_str(Token::Lbrace.identifier());
         for (i, e) in self.kv_pair.iter().enumerate() {
             if i != 0 {
-                buf.push_str(Token::COMMA.identifier());
+                buf.push_str(Token::Comma.identifier());
                 buf.push(' ');
             }
             buf.push_str(e.0.string().as_str());
-            buf.push_str(Token::COLON.identifier());
+            buf.push_str(Token::Colon.identifier());
             buf.push(' ');
             buf.push_str(e.1.string().as_str());
         }
-        buf.push_str(Token::RBRACE.identifier());
+        buf.push_str(Token::Rbrace.identifier());
         buf
     }
 }
@@ -480,15 +480,15 @@ pub struct SliceLiteral {
 impl SliceLiteral {
     pub fn string(&self) -> String {
         let mut buf = String::new();
-        buf.push_str(Token::LBRACKET.identifier());
+        buf.push_str(Token::Lbracket.identifier());
         for (i, e) in self.elements.iter().enumerate() {
             if i != 0 {
-                buf.push_str(Token::COMMA.identifier());
+                buf.push_str(Token::Comma.identifier());
                 buf.push(' ');
             }
             buf.push_str(e.string().as_str());
         }
-        buf.push_str(Token::RBRACKET.identifier());
+        buf.push_str(Token::Rbracket.identifier());
         buf
     }
 }
@@ -504,9 +504,9 @@ impl IndexExpression {
     pub fn string(&self) -> String {
         let mut buf = String::new();
         buf.push_str(self.left.string().as_str());
-        buf.push_str(Token::LBRACKET.identifier());
+        buf.push_str(Token::Lbracket.identifier());
         buf.push_str(self.index.string().as_str());
-        buf.push_str(Token::RBRACKET.identifier());
+        buf.push_str(Token::Rbracket.identifier());
         buf
     }
 }

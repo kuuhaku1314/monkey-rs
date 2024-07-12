@@ -54,7 +54,7 @@ fn parse_file(filename: &String) {
             }
         }
         Err(err) => {
-            println!("Error reading file {} {}", filename, err.to_string())
+            println!("Error reading file {} {}", filename, err)
         }
     }
     let _ = &io::stdin().lock().lines().next();

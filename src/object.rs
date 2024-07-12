@@ -8,23 +8,23 @@ use std::rc::Rc;
 
 #[derive(Clone)]
 pub enum Object {
-    INTEGER(i64),
-    FLOAT(f64),
-    BOOLEAN(bool),
-    STRING(String),
-    EMPTY,
-    FUNCTION(Rc<FunctionLiteral>),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    String(String),
+    Empty,
+    Function(Rc<FunctionLiteral>),
     ReturnValue(Box<Object>),
     BuildIn(String),
-    MAP(Rc<RefCell<HashMap<AbleToMapKey, Object>>>),
-    SLICE(Rc<RefCell<Vec<Object>>>),
+    Map(Rc<RefCell<HashMap<AbleToMapKey, Object>>>),
+    Slice(Rc<RefCell<Vec<Object>>>),
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub enum AbleToMapKey {
-    INTEGER(i64),
-    BOOLEAN(bool),
-    STRING(String),
+    Integer(i64),
+    Boolean(bool),
+    String(String),
 }
 
 impl TryFrom<Object> for AbleToMapKey {
@@ -32,9 +32,9 @@ impl TryFrom<Object> for AbleToMapKey {
 
     fn try_from(value: Object) -> Result<Self, Error> {
         match value {
-            Object::INTEGER(i) => Ok(AbleToMapKey::INTEGER(i)),
-            Object::BOOLEAN(i) => Ok(AbleToMapKey::BOOLEAN(i)),
-            Object::STRING(i) => Ok(AbleToMapKey::STRING(i)),
+            Object::Integer(i) => Ok(AbleToMapKey::Integer(i)),
+            Object::Boolean(i) => Ok(AbleToMapKey::Boolean(i)),
+            Object::String(i) => Ok(AbleToMapKey::String(i)),
             _ => Err(Error {
                 msg: "unable as map key".to_string(),
             }),
@@ -45,9 +45,9 @@ impl TryFrom<Object> for AbleToMapKey {
 impl From<AbleToMapKey> for Object {
     fn from(value: AbleToMapKey) -> Object {
         match value {
-            AbleToMapKey::INTEGER(i) => Object::INTEGER(i),
-            AbleToMapKey::BOOLEAN(i) => Object::BOOLEAN(i),
-            AbleToMapKey::STRING(i) => Object::STRING(i),
+            AbleToMapKey::Integer(i) => Object::Integer(i),
+            AbleToMapKey::Boolean(i) => Object::Boolean(i),
+            AbleToMapKey::String(i) => Object::String(i),
         }
     }
 }
@@ -55,20 +55,20 @@ impl From<AbleToMapKey> for Object {
 impl Display for Object {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Object::INTEGER(v) => {
+            Object::Integer(v) => {
                 write!(f, "{}", v)
             }
-            Object::FLOAT(v) => {
+            Object::Float(v) => {
                 write!(f, "{}", v)
             }
-            Object::BOOLEAN(v) => {
+            Object::Boolean(v) => {
                 write!(f, "{}", v)
             }
-            Object::STRING(v) => {
+            Object::String(v) => {
                 write!(f, "{}", v)
             }
-            Object::EMPTY => Ok(()),
-            Object::FUNCTION(_) => {
+            Object::Empty => Ok(()),
+            Object::Function(_) => {
                 write!(f, "function")
             }
             Object::ReturnValue(v) => {
@@ -77,10 +77,10 @@ impl Display for Object {
             Object::BuildIn(v) => {
                 write!(f, "build in func:{}", v)
             }
-            Object::MAP(_) => {
+            Object::Map(_) => {
                 write!(f, "map")
             }
-            Object::SLICE(_) => {
+            Object::Slice(_) => {
                 write!(f, "slice")
             }
         }
@@ -122,14 +122,14 @@ pub fn from_env(env: &Env, name: &String) -> Option<Object> {
     let env = env.borrow();
     if let Some(value) = env.store.get(name) {
         return Some(match value {
-            Object::INTEGER(v) => Object::INTEGER(*v),
-            Object::FLOAT(v) => Object::FLOAT(*v),
-            Object::BOOLEAN(v) => Object::BOOLEAN(*v),
-            Object::STRING(v) => Object::STRING(v.to_owned()),
-            Object::EMPTY => Object::EMPTY,
-            Object::FUNCTION(v) => Object::FUNCTION(Rc::clone(v)),
-            Object::MAP(v) => Object::MAP(Rc::clone(v)),
-            Object::SLICE(v) => Object::SLICE(Rc::clone(v)),
+            Object::Integer(v) => Object::Integer(*v),
+            Object::Float(v) => Object::Float(*v),
+            Object::Boolean(v) => Object::Boolean(*v),
+            Object::String(v) => Object::String(v.to_owned()),
+            Object::Empty => Object::Empty,
+            Object::Function(v) => Object::Function(Rc::clone(v)),
+            Object::Map(v) => Object::Map(Rc::clone(v)),
+            Object::Slice(v) => Object::Slice(Rc::clone(v)),
             _ => unreachable!(),
         });
     }
@@ -141,8 +141,8 @@ pub fn from_env(env: &Env, name: &String) -> Option<Object> {
 
 pub fn to_env(env: &Env, name: String, value: Object) {
     let mut env = env.borrow_mut();
-    if env.store.contains_key(&name) {
-        env.store.insert(name, value);
+    if let std::collections::hash_map::Entry::Occupied(mut e) = env.store.entry(name.to_owned()) {
+        e.insert(value);
     } else if let Some(ref prev_env) = env.prev {
         to_env(prev_env, name, value);
     } else {

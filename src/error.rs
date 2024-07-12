@@ -14,5 +14,5 @@ impl Display for Error {
 impl std::error::Error for Error {}
 
 pub fn make_error(msg: String) -> Error {
-    return Error { msg };
+    Error { msg }
 }
