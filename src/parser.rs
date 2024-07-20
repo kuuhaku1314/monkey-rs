@@ -38,59 +38,55 @@ pub fn new_parser(lexer: Lexer) -> Parser {
     };
     // For expressions, the current token is the current prefix/infix token when calling the function
     // After the function returns, the current token is the last token in the complete expression
-
-    // prefix
-    parser.register_prefix(
-        discriminant(&Token::Ident(String::default())),
-        Parser::parse_identifier,
-    );
-    parser.register_prefix(
-        discriminant(&Token::IntLiteral(i64::default())),
-        Parser::parse_integer_literal,
-    );
-    parser.register_prefix(
-        discriminant(&Token::FloatLiteral(f64::default())),
-        Parser::parse_float_literal,
-    );
-    parser.register_prefix(discriminant(&Token::True), Parser::parse_bool_literal);
-    parser.register_prefix(discriminant(&Token::False), Parser::parse_bool_literal);
-    parser.register_prefix(
-        discriminant(&Token::StringLiteral(String::default())),
-        Parser::parse_string_literal,
-    );
-    parser.register_prefix(discriminant(&Token::Bang), Parser::parse_prefix_expression);
-    parser.register_prefix(discriminant(&Token::Minus), Parser::parse_prefix_expression);
-    parser.register_prefix(
-        discriminant(&Token::Lparen),
-        Parser::parse_grouped_expression,
-    );
-    parser.register_prefix(discriminant(&Token::IF), Parser::parse_if_expression);
-    parser.register_prefix(
-        discriminant(&Token::Function),
-        Parser::parse_function_expression,
-    );
-    parser.register_prefix(discriminant(&Token::Lbrace), Parser::parse_map_literal);
-    parser.register_prefix(discriminant(&Token::Lbracket), Parser::parse_slice_literal);
+    let prefix_parsers = [
+        (
+            Token::Ident(String::default()),
+            Parser::parse_identifier as PrefixParseFn,
+        ),
+        (
+            Token::IntLiteral(i64::default()),
+            Parser::parse_integer_literal,
+        ),
+        (
+            Token::FloatLiteral(f64::default()),
+            Parser::parse_float_literal,
+        ),
+        (Token::True, Parser::parse_bool_literal),
+        (Token::False, Parser::parse_bool_literal),
+        (
+            Token::StringLiteral(String::default()),
+            Parser::parse_string_literal,
+        ),
+        (Token::Bang, Parser::parse_prefix_expression),
+        (Token::Minus, Parser::parse_prefix_expression),
+        (Token::Lparen, Parser::parse_grouped_expression),
+        (Token::IF, Parser::parse_if_expression),
+        (Token::Function, Parser::parse_function_expression),
+        (Token::Lbrace, Parser::parse_map_literal),
+        (Token::Lbracket, Parser::parse_slice_literal),
+    ];
+    for (token, prefix_fn) in prefix_parsers {
+        parser.register_prefix(token, prefix_fn)
+    }
     // infix
-    parser.register_infix(discriminant(&Token::EQ), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::NotEq), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::LT), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::Lte), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::GT), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::Gte), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::Plus), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::Minus), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::Slash), Parser::parse_infix_expression);
-    parser.register_infix(
-        discriminant(&Token::Asterisk),
-        Parser::parse_infix_expression,
-    );
-    parser.register_infix(discriminant(&Token::Assign), Parser::parse_infix_expression);
-    parser.register_infix(discriminant(&Token::Lparen), Parser::parse_call_expression);
-    parser.register_infix(
-        discriminant(&Token::Lbracket),
-        Parser::parse_index_expression,
-    );
+    let infix_parsers = [
+        (Token::EQ, Parser::parse_infix_expression as InfixParseFn),
+        (Token::NotEq, Parser::parse_infix_expression),
+        (Token::LT, Parser::parse_infix_expression),
+        (Token::Lte, Parser::parse_infix_expression),
+        (Token::GT, Parser::parse_infix_expression),
+        (Token::Gte, Parser::parse_infix_expression),
+        (Token::Plus, Parser::parse_infix_expression),
+        (Token::Minus, Parser::parse_infix_expression),
+        (Token::Slash, Parser::parse_infix_expression),
+        (Token::Asterisk, Parser::parse_infix_expression),
+        (Token::Assign, Parser::parse_infix_expression),
+        (Token::Lparen, Parser::parse_call_expression),
+        (Token::Lbracket, Parser::parse_index_expression),
+    ];
+    for (token, infix_fn) in infix_parsers {
+        parser.register_infix(token, infix_fn)
+    }
     // prefetch
     parser.next_token();
     parser.next_token();
@@ -137,12 +133,12 @@ pub enum OperationPriority {
 }
 
 impl Parser {
-    fn register_prefix(&mut self, token: Discriminant<Token>, func: PrefixParseFn) {
-        self.prefix_parse_fns.insert(token, func);
+    fn register_prefix(&mut self, token: Token, func: PrefixParseFn) {
+        self.prefix_parse_fns.insert(discriminant(&token), func);
     }
 
-    fn register_infix(&mut self, token: Discriminant<Token>, func: InfixParseFn) {
-        self.infix_parse_fns.insert(token, func);
+    fn register_infix(&mut self, token: Token, func: InfixParseFn) {
+        self.infix_parse_fns.insert(discriminant(&token), func);
     }
 
     fn next_token(&mut self) {
@@ -417,8 +413,8 @@ impl Parser {
             // if peek token is } or ; or eof etc..., not meeting this condition, so no problem
             (
                 (precedence.to_owned() as u8) < self.peek_token_precedence() as u8 ||
-                // if is assign, from right to left
-                (precedence == self.peek_token_precedence() && self.peek_token_precedence() == OperationPriority::Assign)
+                    // if is assign, from right to left
+                    (precedence == self.peek_token_precedence() && self.peek_token_precedence() == OperationPriority::Assign)
             )
         {
             let func = self
