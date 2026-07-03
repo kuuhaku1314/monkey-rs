@@ -1,0 +1,92 @@
+{
+  "name": "monkey-rs-vscode",
+  "displayName": "Monkey RS",
+  "description": "Editing support for the Monkey RS language.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:monkey"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "monkey",
+        "aliases": [
+          "Monkey",
+          "monkey"
+        ],
+        "extensions": [
+          ".monkey"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "monkey",
+        "scopeName": "source.monkey",
+        "path": "./syntaxes/monkey.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "monkey.runFile",
+        "title": "Monkey: Run Current File"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "monkey.runFile",
+          "when": "resourceLangId == monkey",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "monkey.runFile",
+          "when": "resourceLangId == monkey",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "monkey.runFile",
+        "key": "cmd+alt+r",
+        "mac": "cmd+alt+r",
+        "win": "ctrl+alt+r",
+        "linux": "ctrl+alt+r",
+        "when": "editorTextFocus && resourceLangId == monkey"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "monkey",
+        "path": "./snippets/monkey.json"
+      }
+    ],
+    "configuration": {
+      "title": "Monkey RS",
+      "properties": {
+        "monkey.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the monkey-rs executable. If empty, the extension runs `cargo run --quiet --` from the workspace root."
+        },
+        "monkey.cargoRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Workspace directory containing Cargo.toml. Used when monkey.executablePath is empty."
+        }
+      }
+    }
+  }
+}

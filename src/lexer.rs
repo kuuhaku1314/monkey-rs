@@ -2,9 +2,10 @@ use crate::error::Error;
 use crate::token::Token::StringLiteral;
 use crate::token::{Token, KEY_WORDS_TABLE};
 
+#[derive(Clone)]
 pub struct Lexer {
-    path: Option<String>,
     input: Vec<char>,
+    path: Option<String>,
     position: usize,
     read_position: usize,
     ch: char,
@@ -12,8 +13,33 @@ pub struct Lexer {
     cur_ch_position: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position(pub usize, pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: Position,
+    pub end: Position,
+}
+
+impl Span {
+    pub fn new(start: Position, end: Position) -> Span {
+        Span { start, end }
+    }
+
+    pub fn point(position: Position) -> Span {
+        Span {
+            start: position,
+            end: position,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: Span,
+}
 
 impl From<(usize, usize)> for Position {
     fn from(tuple: (usize, usize)) -> Self {
@@ -28,8 +54,8 @@ pub fn new_lexer(input: String, path: Option<String>) -> Lexer {
         ch = unicode[0];
     }
     Lexer {
-        path,
         input: unicode,
+        path,
         position: 0,
         read_position: 1,
         ch,
@@ -39,142 +65,156 @@ pub fn new_lexer(input: String, path: Option<String>) -> Lexer {
 }
 
 impl Lexer {
+    pub fn path(&self) -> Option<String> {
+        self.path.to_owned()
+    }
+
     pub fn line_char_at(&self) -> (usize, usize) {
         (self.cur_line, self.cur_ch_position)
     }
 
-    pub fn file_path(&self) -> Option<String> {
-        self.path.to_owned()
-    }
+    pub fn next_spanned_token(&mut self) -> SpannedToken {
+        loop {
+            self.skip_blanks();
+            if self.ch == '/' && self.look_ahead() == Some('/') {
+                _ = self.read_note();
+                continue;
+            }
+            break;
+        }
 
-    pub fn cur_position_msg(&self) -> String {
-        match self.path {
-            None => {
-                format!("{}:{}", self.cur_line, self.cur_ch_position)
+        let start = self.current_position();
+        let token = match self.ch {
+            '=' => match self.look_ahead() {
+                Some('=') => {
+                    self.read_char();
+                    Token::EQ
+                }
+                _ => Token::Assign,
+            },
+            ';' => Token::Semicolon,
+            '(' => Token::Lparen,
+            ')' => Token::Rparen,
+            ',' => Token::Comma,
+            '.' => Token::Dot,
+            '+' => Token::Plus,
+            '-' => Token::Minus,
+            '!' => {
+                // note or div
+                match self.look_ahead() {
+                    Some('=') => {
+                        self.read_char();
+                        Token::NotEq
+                    }
+                    _ => Token::Bang,
+                }
             }
-            Some(ref path) => {
-                format!(
-                    "{}{}{}:{}",
-                    path,
-                    std::path::MAIN_SEPARATOR,
-                    self.cur_line,
-                    self.cur_ch_position
-                )
+            '*' => Token::Asterisk,
+            '&' => match self.look_ahead() {
+                Some('&') => {
+                    self.read_char();
+                    Token::And
+                }
+                _ => Token::Illegal(
+                    '&'.to_string(),
+                    Error::with_span(
+                        "invalid char &, did you mean &&".to_string(),
+                        Span::point(self.line_char_at().into()),
+                    )
+                    .with_source_path(self.path()),
+                ),
+            },
+            '|' => match self.look_ahead() {
+                Some('|') => {
+                    self.read_char();
+                    Token::Or
+                }
+                _ => Token::Illegal(
+                    '|'.to_string(),
+                    Error::with_span(
+                        "invalid char |, did you mean ||".to_string(),
+                        Span::point(self.line_char_at().into()),
+                    )
+                    .with_source_path(self.path()),
+                ),
+            },
+            '<' => {
+                // note or div
+                match self.look_ahead() {
+                    Some('=') => {
+                        self.read_char();
+                        Token::Lte
+                    }
+                    _ => Token::LT,
+                }
             }
+            '>' => {
+                // note or div
+                match self.look_ahead() {
+                    Some('=') => {
+                        self.read_char();
+                        Token::Gte
+                    }
+                    _ => Token::GT,
+                }
+            }
+            '{' => Token::Lbrace,
+            '}' => Token::Rbrace,
+            '[' => Token::Lbracket,
+            ']' => Token::Rbracket,
+            ':' => Token::Colon,
+            '\0' => {
+                if self.is_stream_eof() {
+                    return SpannedToken {
+                        token: Token::Eof,
+                        span: Span::point(start),
+                    };
+                } else {
+                    Token::Illegal(
+                        '\0'.to_string(),
+                        Error::with_span(
+                            "invalid eof char".to_string(),
+                            Span::point(self.line_char_at().into()),
+                        )
+                        .with_source_path(self.path()),
+                    )
+                }
+            }
+            '/' => Token::Slash,
+            '"' => self.read_string(), // string
+            other => {
+                let token = if is_letter(other) {
+                    self.read_identifier()
+                } else if is_digit(other) {
+                    self.read_number()
+                } else {
+                    let token = Token::Illegal(
+                        other.to_string(),
+                        Error::with_span(
+                            format!("invalid char {}", other),
+                            Span::point(self.line_char_at().into()),
+                        )
+                        .with_source_path(self.path()),
+                    );
+                    // skip invalid char
+                    self.read_char();
+                    token
+                };
+                return SpannedToken {
+                    token,
+                    span: Span::new(start, self.current_position()),
+                };
+            }
+        };
+        self.read_char();
+        SpannedToken {
+            token,
+            span: Span::new(start, self.current_position()),
         }
     }
 
-    pub fn next_token(&mut self) -> Token {
-        let token = loop {
-            break match self.ch {
-                '=' => {
-                    // note or div
-                    match self.look_ahead() {
-                        Some('=') => {
-                            self.read_char();
-                            Token::EQ
-                        }
-                        _ => Token::Assign,
-                    }
-                }
-                ';' => Token::Semicolon,
-                '(' => Token::Lparen,
-                ')' => Token::Rparen,
-                ',' => Token::Comma,
-                '+' => Token::Plus,
-                '-' => Token::Minus,
-                '!' => {
-                    // note or div
-                    match self.look_ahead() {
-                        Some('=') => {
-                            self.read_char();
-                            Token::NotEq
-                        }
-                        _ => Token::Bang,
-                    }
-                }
-                '*' => Token::Asterisk,
-                '<' => {
-                    // note or div
-                    match self.look_ahead() {
-                        Some('=') => {
-                            self.read_char();
-                            Token::Lte
-                        }
-                        _ => Token::LT,
-                    }
-                }
-                '>' => {
-                    // note or div
-                    match self.look_ahead() {
-                        Some('=') => {
-                            self.read_char();
-                            Token::Gte
-                        }
-                        _ => Token::GT,
-                    }
-                }
-                '{' => Token::Lbrace,
-                '}' => Token::Rbrace,
-                '[' => Token::Lbracket,
-                ']' => Token::Rbracket,
-                ':' => Token::Colon,
-                '\0' => {
-                    // stream end or invalid token
-                    if self.is_stream_eof() {
-                        Token::Eof
-                    } else {
-                        Token::Illegal(
-                            '\0'.to_string(),
-                            Error {
-                                msg: format!("invalid eof char at {}", self.cur_position_msg()),
-                            },
-                        )
-                    }
-                }
-                '/' => {
-                    // note or div
-                    match self.look_ahead() {
-                        Some('/') => {
-                            _ = self.read_note();
-                            continue;
-                        }
-                        _ => Token::Slash,
-                    }
-                }
-                '"' => self.read_string(), // string
-                ' ' | '\t' | '\n' => {
-                    // blank
-                    self.skip_blanks();
-                    continue;
-                }
-                other => {
-                    // number or identity or invalid token
-                    // should be return because already read next char
-                    return if is_letter(other) {
-                        self.read_identifier()
-                    } else if is_digit(other) {
-                        self.read_number()
-                    } else {
-                        let token = Token::Illegal(
-                            other.to_string(),
-                            Error {
-                                msg: format!(
-                                    "invalid char {} at {}",
-                                    other,
-                                    self.cur_position_msg()
-                                ),
-                            },
-                        );
-                        // skip invalid char
-                        self.read_char();
-                        token
-                    };
-                }
-            };
-        };
-        self.read_char();
-        token
+    fn current_position(&self) -> Position {
+        self.line_char_at().into()
     }
 
     fn look_ahead(&mut self) -> Option<char> {
@@ -253,9 +293,11 @@ impl Lexer {
                 Ok(num) => Token::FloatLiteral(num),
                 Err(_) => Token::Illegal(
                     str.to_owned(),
-                    Error {
-                        msg: format!("invalid float {} at {}", str, self.cur_position_msg()),
-                    },
+                    Error::with_span(
+                        format!("invalid float {}", str),
+                        Span::point(self.line_char_at().into()),
+                    )
+                    .with_source_path(self.path()),
                 ),
             }
         } else {
@@ -263,9 +305,11 @@ impl Lexer {
                 Ok(num) => Token::IntLiteral(num),
                 Err(_) => Token::Illegal(
                     str.to_owned(),
-                    Error {
-                        msg: format!("invalid float {} at {}", str, self.cur_position_msg()),
-                    },
+                    Error::with_span(
+                        format!("invalid integer {}", str),
+                        Span::point(self.line_char_at().into()),
+                    )
+                    .with_source_path(self.path()),
                 ),
             }
         }
@@ -289,13 +333,11 @@ impl Lexer {
                     None => {
                         return Token::Illegal(
                             ch.to_string(),
-                            Error {
-                                msg: format!(
-                                    "unclosed char literal {} at {}",
-                                    str,
-                                    self.cur_position_msg()
-                                ),
-                            },
+                            Error::with_span(
+                                format!("unclosed char literal {}", str),
+                                Span::point(self.line_char_at().into()),
+                            )
+                            .with_source_path(self.path()),
                         )
                     }
                     Some(ch) => {
@@ -309,13 +351,11 @@ impl Lexer {
                             _ => {
                                 return Token::Illegal(
                                     format!("\\{}", ch),
-                                    Error {
-                                        msg: format!(
-                                            "unsupported escape character \\{} at {}",
-                                            ch,
-                                            self.cur_position_msg()
-                                        ),
-                                    },
+                                    Error::with_span(
+                                        format!("unsupported escape character \\{}", ch),
+                                        Span::point(self.line_char_at().into()),
+                                    )
+                                    .with_source_path(self.path()),
                                 )
                             }
                         };
@@ -331,13 +371,11 @@ impl Lexer {
         if self.is_stream_eof() {
             return Token::Illegal(
                 format!("\"{}", str),
-                Error {
-                    msg: format!(
-                        "not closed string {} at {}, should be \"",
-                        str,
-                        self.cur_position_msg()
-                    ),
-                },
+                Error::with_span(
+                    format!("not closed string {}, should be \"", str),
+                    Span::point(self.line_char_at().into()),
+                )
+                .with_source_path(self.path()),
             );
         }
         StringLiteral(str)
@@ -346,7 +384,7 @@ impl Lexer {
     fn skip_blanks(&mut self) {
         loop {
             let ch = self.ch;
-            if ch == ' ' || ch == '\t' {
+            if ch == ' ' || ch == '\t' || ch == '\r' {
                 self.read_char();
                 continue;
             }
@@ -374,37 +412,47 @@ mod tests {
     use crate::token::Token;
 
     #[test]
-    fn test_next_token() {
+    fn test_next_spanned_token() {
         let input = String::from("let apple_number = 3;\n\n// test note! \n  let fruit[2]\n =\t  {3.1 ,0}  ; let name = \"\\n\\\"小王\" ;// ");
         let mut lexer = new_lexer(input, None);
-        assert_eq!(lexer.next_token(), Token::Let);
+        assert_eq!(next_token_value(&mut lexer), Token::Let);
         assert_eq!(
-            lexer.next_token(),
+            next_token_value(&mut lexer),
             Token::Ident(String::from("apple_number"))
         );
-        assert_eq!(lexer.next_token(), Token::Assign);
-        assert_eq!(lexer.next_token(), Token::IntLiteral(3));
-        assert_eq!(lexer.next_token(), Token::Semicolon);
-        assert_eq!(lexer.next_token(), Token::Let);
-        assert_eq!(lexer.next_token(), Token::Ident(String::from("fruit")));
-        assert_eq!(lexer.next_token(), Token::Lbracket);
-        assert_eq!(lexer.next_token(), Token::IntLiteral(2));
-        assert_eq!(lexer.next_token(), Token::Rbracket);
-        assert_eq!(lexer.next_token(), Token::Assign);
-        assert_eq!(lexer.next_token(), Token::Lbrace);
-        assert_eq!(lexer.next_token(), Token::FloatLiteral(3.1));
-        assert_eq!(lexer.next_token(), Token::Comma);
-        assert_eq!(lexer.next_token(), Token::IntLiteral(0));
-        assert_eq!(lexer.next_token(), Token::Rbrace);
-        assert_eq!(lexer.next_token(), Token::Semicolon);
-        assert_eq!(lexer.next_token(), Token::Let);
-        assert_eq!(lexer.next_token(), Token::Ident(String::from("name")));
-        assert_eq!(lexer.next_token(), Token::Assign);
+        assert_eq!(next_token_value(&mut lexer), Token::Assign);
+        assert_eq!(next_token_value(&mut lexer), Token::IntLiteral(3));
+        assert_eq!(next_token_value(&mut lexer), Token::Semicolon);
+        assert_eq!(next_token_value(&mut lexer), Token::Let);
         assert_eq!(
-            lexer.next_token(),
+            next_token_value(&mut lexer),
+            Token::Ident(String::from("fruit"))
+        );
+        assert_eq!(next_token_value(&mut lexer), Token::Lbracket);
+        assert_eq!(next_token_value(&mut lexer), Token::IntLiteral(2));
+        assert_eq!(next_token_value(&mut lexer), Token::Rbracket);
+        assert_eq!(next_token_value(&mut lexer), Token::Assign);
+        assert_eq!(next_token_value(&mut lexer), Token::Lbrace);
+        assert_eq!(next_token_value(&mut lexer), Token::FloatLiteral(3.1));
+        assert_eq!(next_token_value(&mut lexer), Token::Comma);
+        assert_eq!(next_token_value(&mut lexer), Token::IntLiteral(0));
+        assert_eq!(next_token_value(&mut lexer), Token::Rbrace);
+        assert_eq!(next_token_value(&mut lexer), Token::Semicolon);
+        assert_eq!(next_token_value(&mut lexer), Token::Let);
+        assert_eq!(
+            next_token_value(&mut lexer),
+            Token::Ident(String::from("name"))
+        );
+        assert_eq!(next_token_value(&mut lexer), Token::Assign);
+        assert_eq!(
+            next_token_value(&mut lexer),
             Token::StringLiteral(String::from("\n\"小王"))
         );
-        assert_eq!(lexer.next_token(), Token::Semicolon);
-        assert_eq!(lexer.next_token(), Token::Eof);
+        assert_eq!(next_token_value(&mut lexer), Token::Semicolon);
+        assert_eq!(next_token_value(&mut lexer), Token::Eof);
+    }
+
+    fn next_token_value(lexer: &mut crate::lexer::Lexer) -> Token {
+        lexer.next_spanned_token().token
     }
 }

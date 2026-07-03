@@ -1,0 +1,1 @@
+cargo run .\examples\lanternbound\main.monkey

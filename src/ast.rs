@@ -1,4 +1,4 @@
-use crate::lexer::Position;
+use crate::lexer::Span;
 use crate::token::Token;
 
 #[derive(Clone)]
@@ -8,35 +8,32 @@ pub enum Statement {
     Expression(ExpressionStatement),
     Let(LetStatement),
     Return(ReturnStatement),
+    Import(ImportStatement),
+    Export(ExportStatement),
+    Struct(StructStatement),
+    Break(BreakStatement),
+    Continue(ContinueStatement),
     While(WhileStatement),
-    IndexAssign(IndexAssignStatement),
+    Assign(AssignStatement),
     ForIn(ForInStatement),
 }
 
 impl Statement {
-    pub fn string(&self) -> String {
+    pub fn span(&self) -> Span {
         match self {
-            Statement::Block(v) => v.string(),
-            Statement::Empty(v) => v.string(),
-            Statement::Expression(v) => v.string(),
-            Statement::Let(v) => v.string(),
-            Statement::Return(v) => v.string(),
-            Statement::While(v) => v.string(),
-            Statement::IndexAssign(v) => v.string(),
-            Statement::ForIn(v) => v.string(),
-        }
-    }
-
-    pub fn position(&self) -> Position {
-        match self {
-            Statement::Block(v) => v.position.to_owned(),
-            Statement::Empty(v) => v.position.to_owned(),
-            Statement::Expression(v) => v.position.to_owned(),
-            Statement::Let(v) => v.position.to_owned(),
-            Statement::Return(v) => v.position.to_owned(),
-            Statement::While(v) => v.position.to_owned(),
-            Statement::IndexAssign(v) => v.position.to_owned(),
-            Statement::ForIn(v) => v.position.to_owned(),
+            Statement::Block(v) => v.span,
+            Statement::Empty(v) => v.span,
+            Statement::Expression(v) => v.span,
+            Statement::Let(v) => v.span,
+            Statement::Return(v) => v.span,
+            Statement::Import(v) => v.span,
+            Statement::Export(v) => v.span,
+            Statement::Struct(v) => v.span,
+            Statement::Break(v) => v.span,
+            Statement::Continue(v) => v.span,
+            Statement::While(v) => v.span,
+            Statement::Assign(v) => v.span,
+            Statement::ForIn(v) => v.span,
         }
     }
 }
@@ -44,6 +41,7 @@ impl Statement {
 #[derive(Clone)]
 pub enum Expression {
     Bool(BoolLiteral),
+    Null(NullLiteral),
     Float(FloatLiteral),
     Integer(IntegerLiteral),
     String(StringLiteral),
@@ -55,458 +53,241 @@ pub enum Expression {
     Prefix(Box<PrefixExpression>),
     Slice(SliceLiteral),
     Map(MapLiteral),
+    StructLiteral(StructLiteral),
     Index(Box<IndexExpression>),
+    Member(Box<MemberExpression>),
 }
 
 impl Expression {
-    pub fn string(&self) -> String {
+    pub fn span(&self) -> Span {
         match self {
-            Expression::Bool(v) => v.string(),
-            Expression::Float(v) => v.string(),
-            Expression::Integer(v) => v.string(),
-            Expression::String(v) => v.string(),
-            Expression::Function(v) => v.string(),
-            Expression::Call(v) => v.string(),
-            Expression::Identifier(v) => v.string(),
-            Expression::If(v) => v.string(),
-            Expression::Infix(v) => v.string(),
-            Expression::Prefix(v) => v.string(),
-            Expression::Slice(v) => v.string(),
-            Expression::Map(v) => v.string(),
-            Expression::Index(v) => v.string(),
-        }
-    }
-
-    pub fn position(&self) -> Position {
-        match self {
-            Expression::Bool(v) => v.position.to_owned(),
-            Expression::Float(v) => v.position.to_owned(),
-            Expression::Integer(v) => v.position.to_owned(),
-            Expression::String(v) => v.position.to_owned(),
-            Expression::Function(v) => v.position.to_owned(),
-            Expression::Call(v) => v.position.to_owned(),
-            Expression::Identifier(v) => v.position.to_owned(),
-            Expression::If(v) => v.position.to_owned(),
-            Expression::Infix(v) => v.position.to_owned(),
-            Expression::Prefix(v) => v.position.to_owned(),
-            Expression::Slice(v) => v.position.to_owned(),
-            Expression::Map(v) => v.position.to_owned(),
-            Expression::Index(v) => v.position.to_owned(),
+            Expression::Bool(v) => v.span,
+            Expression::Null(v) => v.span,
+            Expression::Float(v) => v.span,
+            Expression::Integer(v) => v.span,
+            Expression::String(v) => v.span,
+            Expression::Function(v) => v.span,
+            Expression::Call(v) => v.span,
+            Expression::Identifier(v) => v.span,
+            Expression::If(v) => v.span,
+            Expression::Infix(v) => v.span,
+            Expression::Prefix(v) => v.span,
+            Expression::Slice(v) => v.span,
+            Expression::Map(v) => v.span,
+            Expression::StructLiteral(v) => v.span,
+            Expression::Index(v) => v.span,
+            Expression::Member(v) => v.span,
         }
     }
 }
 
 pub struct Program {
     pub statements: Vec<Statement>,
-}
-
-impl Program {
-    pub fn string(&self) -> String {
-        self.statements
-            .iter()
-            .map(|statement| statement.string())
-            .reduce(|acc, e| acc + "\n" + e.as_str())
-            .unwrap_or(String::default())
-    }
+    pub path: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct LetStatement {
-    pub position: Position,
+    pub span: Span,
     pub name: Identifier,
     pub value: Expression,
 }
 
-impl LetStatement {
-    pub fn string(&self) -> String {
-        format!(
-            "{} {} = {};",
-            Token::Let.identifier(),
-            self.name.string(),
-            self.value.string()
-        )
-    }
-}
-
 #[derive(Clone)]
 pub struct ReturnStatement {
-    pub position: Position,
+    pub span: Span,
     pub value: Expression,
 }
 
-impl ReturnStatement {
-    pub fn string(&self) -> String {
-        format!("{} {};", Token::Return.identifier(), self.value.string())
-    }
+#[derive(Clone)]
+pub struct ImportStatement {
+    pub span: Span,
+    pub alias: Option<Identifier>,
+    pub path: StringLiteral,
+}
+
+#[derive(Clone)]
+pub struct ExportStatement {
+    pub span: Span,
+    pub name: Identifier,
+}
+
+#[derive(Clone)]
+pub struct StructStatement {
+    pub span: Span,
+    pub name: Identifier,
+    pub fields: Vec<Identifier>,
+}
+
+#[derive(Clone)]
+pub struct BreakStatement {
+    pub span: Span,
+}
+
+#[derive(Clone)]
+pub struct ContinueStatement {
+    pub span: Span,
 }
 
 #[derive(Clone)]
 pub struct ExpressionStatement {
-    pub position: Position,
+    pub span: Span,
     pub expression: Expression,
     /// if true, express statement value is empty value
     pub end_of_semicolon: bool,
 }
 
-impl ExpressionStatement {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        if self.end_of_semicolon {
-            buf.push(';');
-        }
-        format!("{}{}", self.expression.string(), buf.as_str())
-    }
-}
-
 #[derive(Clone)]
 pub struct EmptyStatement {
-    pub position: Position,
-}
-
-impl EmptyStatement {
-    pub fn string(&self) -> String {
-        ";".to_owned()
-    }
+    pub span: Span,
 }
 
 #[derive(Clone)]
 pub struct BlockStatement {
-    pub position: Position,
+    pub span: Span,
     pub statements: Vec<Statement>,
-}
-
-impl BlockStatement {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(Token::Lbrace.identifier());
-        self.statements.iter().for_each(|statement| {
-            buf.push('\n');
-            buf.push('\t');
-            buf.push_str(statement.string().as_str());
-        });
-        buf.push('\n');
-        buf.push_str(Token::Rbrace.identifier());
-        buf
-    }
 }
 
 #[derive(Clone)]
 pub struct PrefixExpression {
-    pub position: Position,
+    pub span: Span,
     pub token: Token,
     pub right: Expression,
 }
 
-impl PrefixExpression {
-    pub fn string(&self) -> String {
-        format!("({}{})", self.token.literal(), self.right.string())
-    }
-}
-
 #[derive(Clone)]
 pub struct InfixExpression {
-    pub position: Position,
+    pub span: Span,
     pub token: Token,
     pub left: Expression,
     pub right: Expression,
 }
 
-impl InfixExpression {
-    pub fn string(&self) -> String {
-        format!(
-            "({} {} {})",
-            self.left.string(),
-            self.token.literal(),
-            self.right.string()
-        )
-    }
-}
-
 #[derive(Clone)]
 pub struct Identifier {
-    pub position: Position,
-    pub token: Token,
+    pub span: Span,
     pub name: String,
-}
-
-impl Identifier {
-    pub fn string(&self) -> String {
-        self.token.literal()
-    }
 }
 
 #[derive(Clone)]
 pub struct IntegerLiteral {
-    pub position: Position,
-    pub token: Token,
+    pub span: Span,
     pub value: i64,
-}
-
-impl IntegerLiteral {
-    pub fn string(&self) -> String {
-        self.token.literal()
-    }
 }
 
 #[derive(Clone)]
 pub struct FloatLiteral {
-    pub position: Position,
-    pub token: Token,
+    pub span: Span,
     pub value: f64,
-}
-
-impl FloatLiteral {
-    pub fn string(&self) -> String {
-        self.token.literal()
-    }
 }
 
 #[derive(Clone)]
 pub struct BoolLiteral {
-    pub position: Position,
-    pub token: Token,
+    pub span: Span,
     pub value: bool,
 }
 
-impl BoolLiteral {
-    pub fn string(&self) -> String {
-        self.token.literal()
-    }
+#[derive(Clone)]
+pub struct NullLiteral {
+    pub span: Span,
 }
 
 #[derive(Clone)]
 pub struct StringLiteral {
-    pub position: Position,
-    pub token: Token,
+    pub span: Span,
     pub value: String,
-}
-
-impl StringLiteral {
-    pub fn string(&self) -> String {
-        self.token.literal()
-    }
 }
 
 #[derive(Clone)]
 pub struct IfExpression {
-    pub position: Position,
+    pub span: Span,
     pub condition: Expression,
     pub consequence: BlockStatement,
     pub alternative: Option<BlockStatement>,
     pub optional: Option<Box<Expression>>,
 }
 
-impl IfExpression {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(Token::IF.identifier());
-        buf.push(' ');
-        buf.push_str(self.condition.string().as_str());
-        buf.push(' ');
-        buf.push_str(self.consequence.string().as_str());
-        if self.alternative.is_some() {
-            buf.push(' ');
-            buf.push_str(Token::Else.identifier());
-            buf.push(' ');
-            buf.push_str(self.alternative.as_ref().unwrap().string().as_str());
-        }
-        if self.optional.is_some() {
-            buf.push(' ');
-            buf.push_str(Token::Else.identifier());
-            buf.push(' ');
-            buf.push_str(self.optional.as_ref().unwrap().string().as_str());
-        }
-        buf
-    }
-}
-
 #[derive(Clone)]
 pub struct WhileStatement {
-    pub position: Position,
+    pub span: Span,
     pub condition: Expression,
     pub consequence: BlockStatement,
 }
 
-impl WhileStatement {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(Token::While.identifier());
-        buf.push(' ');
-        buf.push_str(self.condition.string().as_str());
-        buf.push(' ');
-        buf.push_str(self.consequence.string().as_str());
-        buf
-    }
-}
-
 #[derive(Clone)]
 pub struct ForInStatement {
-    pub position: Position,
+    pub span: Span,
     pub collection: Expression,
     pub key: Identifier,
     pub value: Option<Identifier>,
     pub body: BlockStatement,
 }
 
-impl ForInStatement {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(Token::For.identifier());
-        buf.push(' ');
-        buf.push_str(self.key.string().as_str());
-        if self.value.is_some() {
-            buf.push_str(Token::Comma.identifier());
-            buf.push(' ');
-            buf.push_str(self.key.string().as_str());
-        }
-        buf.push(' ');
-        buf.push_str(Token::IN.identifier());
-        buf.push(' ');
-        buf.push_str(self.collection.string().as_str());
-        buf.push(' ');
-        buf.push_str(self.body.string().as_str());
-        buf
-    }
+#[derive(Clone)]
+pub struct AssignStatement {
+    pub span: Span,
+    pub target: AssignTarget,
+    pub value: Expression,
 }
 
 #[derive(Clone)]
-pub struct IndexAssignStatement {
-    pub position: Position,
-    pub left: Expression,
-    pub index: Expression,
-    pub right: Expression,
-}
-
-impl IndexAssignStatement {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(self.left.string().as_str());
-        buf.push_str(Token::Lbracket.identifier());
-        buf.push_str(self.index.string().as_str());
-        buf.push_str(Token::Rbracket.identifier());
-        buf.push_str(self.right.string().as_str());
-        buf
-    }
+pub enum AssignTarget {
+    Identifier(Identifier),
+    Index {
+        left: Expression,
+        index: Expression,
+    },
+    Member {
+        left: Expression,
+        property: Identifier,
+    },
 }
 
 #[derive(Clone)]
 pub struct FunctionLiteral {
-    pub position: Position,
+    pub span: Span,
     pub name: Option<Identifier>,
     pub parameters: Vec<Identifier>,
     pub body: BlockStatement,
 }
 
-impl FunctionLiteral {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(Token::Function.identifier());
-        buf.push(' ');
-        if self.name.is_some() {
-            buf.push_str(self.name.as_ref().unwrap().string().as_str());
-        }
-        buf.push_str(Token::Lparen.identifier());
-        buf.push_str(
-            self.parameters
-                .iter()
-                .map(|parameter| parameter.string())
-                .reduce(|acc, e| acc + ", " + e.as_str())
-                .unwrap_or(String::default())
-                .as_str(),
-        );
-        buf.push_str(Token::Rparen.identifier());
-        buf.push(' ');
-        buf.push_str(self.body.string().as_str());
-        buf
-    }
-}
-
 #[derive(Clone)]
 pub struct CallExpression {
-    pub position: Position,
+    pub span: Span,
     pub function: Expression,
     pub arguments: Vec<Expression>,
 }
 
-impl CallExpression {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(self.function.string().as_str());
-        buf.push_str(Token::Lparen.identifier());
-        buf.push_str(
-            self.arguments
-                .iter()
-                .map(|parameter| parameter.string())
-                .reduce(|acc, e| acc + ", " + e.as_str())
-                .unwrap_or(String::default())
-                .as_str(),
-        );
-        buf.push_str(Token::Rparen.identifier());
-        buf
-    }
-}
-
 #[derive(Clone)]
 pub struct MapLiteral {
-    pub position: Position,
+    pub span: Span,
     pub kv_pair: Vec<(Expression, Expression)>,
 }
 
-impl MapLiteral {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(Token::Lbrace.identifier());
-        for (i, e) in self.kv_pair.iter().enumerate() {
-            if i != 0 {
-                buf.push_str(Token::Comma.identifier());
-                buf.push(' ');
-            }
-            buf.push_str(e.0.string().as_str());
-            buf.push_str(Token::Colon.identifier());
-            buf.push(' ');
-            buf.push_str(e.1.string().as_str());
-        }
-        buf.push_str(Token::Rbrace.identifier());
-        buf
-    }
+#[derive(Clone)]
+pub struct StructLiteral {
+    pub span: Span,
+    pub name: Box<Expression>,
+    pub fields: Vec<(Identifier, Expression)>,
+    pub values: Vec<Expression>,
 }
 
 #[derive(Clone)]
 pub struct SliceLiteral {
-    pub position: Position,
+    pub span: Span,
     pub elements: Vec<Expression>,
-}
-
-impl SliceLiteral {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(Token::Lbracket.identifier());
-        for (i, e) in self.elements.iter().enumerate() {
-            if i != 0 {
-                buf.push_str(Token::Comma.identifier());
-                buf.push(' ');
-            }
-            buf.push_str(e.string().as_str());
-        }
-        buf.push_str(Token::Rbracket.identifier());
-        buf
-    }
 }
 
 #[derive(Clone)]
 pub struct IndexExpression {
-    pub position: Position,
+    pub span: Span,
     pub left: Expression,
     pub index: Expression,
 }
 
-impl IndexExpression {
-    pub fn string(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(self.left.string().as_str());
-        buf.push_str(Token::Lbracket.identifier());
-        buf.push_str(self.index.string().as_str());
-        buf.push_str(Token::Rbracket.identifier());
-        buf
-    }
+#[derive(Clone)]
+pub struct MemberExpression {
+    pub span: Span,
+    pub left: Expression,
+    pub property: Identifier,
 }

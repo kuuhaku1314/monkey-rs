@@ -1,0 +1,62 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:args}) {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Function declaration"
+  },
+  "If Else": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "    ${2}",
+      "} else {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "If/else expression"
+  },
+  "For In": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i}, ${2:value} in ${3:values} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "For-in loop"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "    ${2:field};",
+      "}"
+    ],
+    "description": "Struct declaration"
+  },
+  "Namespace Import": {
+    "prefix": "importns",
+    "body": "import ${1:name} from \"${2:path}\";",
+    "description": "Namespace import"
+  },
+  "Bare Import": {
+    "prefix": "import",
+    "body": "import \"${1:path}\";",
+    "description": "Bare import"
+  },
+  "Result Check": {
+    "prefix": "result",
+    "body": [
+      "let ${1:result} = ${2:call};",
+      "if ${1:result}.ok {",
+      "    ${3:${1:result}.value}",
+      "} else {",
+      "    ${0:${1:result}.error.message}",
+      "}"
+    ],
+    "description": "Handle a standard Result map"
+  }
+}

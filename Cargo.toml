@@ -5,4 +5,10 @@ edition = "2021"
 publish = ["crates-io"]
 
 [dependencies]
+base64 = "0.22"
+crossterm = "0.27"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha2 = "0.10"
 strum = { version = "0.26", features = ["derive"] }
+urlencoding = "2.1"

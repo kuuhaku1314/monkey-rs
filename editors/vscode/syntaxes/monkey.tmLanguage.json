@@ -1,0 +1,94 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Monkey",
+  "scopeName": "source.monkey",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#functions"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.monkey",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.monkey",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.monkey",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.monkey",
+          "match": "\\b-?\\d+(\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.monkey",
+          "match": "\\b(if|else|while|for|in|break|continue|return)\\b"
+        },
+        {
+          "name": "keyword.declaration.monkey",
+          "match": "\\b(let|fn|struct|import|from|export)\\b"
+        },
+        {
+          "name": "constant.language.monkey",
+          "match": "\\b(true|false|null)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.monkey",
+          "match": "\\b(print|len|byte_len|str|int|float|parse_int|parse_float|append|delete|join|args|read_line|panic|assert|substr|find|replace|char_code|from_char_code|type|is_null|is_bool|is_int|is_float|is_string|is_list|is_map)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.monkey",
+          "match": "(?<=\\bfn\\s)[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
+          "name": "entity.name.type.struct.monkey",
+          "match": "(?<=\\bstruct\\s)[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    }
+  }
+}
