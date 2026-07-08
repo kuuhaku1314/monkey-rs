@@ -1,16 +1,14 @@
 use crate::error::ErrorKind;
-use crate::evaluator::eval;
 use crate::lexer::new_lexer;
-use crate::object::{new_env, Object};
 use crate::parser::new_parser;
+use crate::vm::{eval_vm, VmValue};
 use std::fs;
-use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn eval_input(input: &str) -> Result<Object, crate::error::Error> {
+fn eval_input(input: &str) -> Result<VmValue, crate::error::Error> {
     let mut parser = new_parser(new_lexer(input.to_string(), Some("test".to_string())));
     let program = parser.parse_program()?;
-    eval(&program, Rc::clone(&new_env()))
+    eval_vm(&program)
 }
 
 fn nonzero_exec_expression() -> &'static str {
@@ -43,8 +41,9 @@ fn monkey_string_literal(value: &str) -> String {
 
 #[test]
 fn unicode_len_counts_chars_and_byte_len_counts_bytes() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         let chars = len("中文");
         let bytes = byte_len("中文");
         if chars == 2 {
@@ -53,36 +52,36 @@ fn unicode_len_counts_chars_and_byte_len_counts_bytes() {
             0
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 6),
-        other => panic!("expected integer 6, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        6
+    );
 }
 
 #[test]
 fn numeric_mixed_operations_are_supported() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         let result = 1 + 2.5;
         result = result + (5.0 - 1);
         result = result + (2 * 1.5);
         result = result + (5 / 2.0);
         if true { result }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Float(actual) => assert_eq!(actual, 13.0),
-        other => panic!("expected float 13.0, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_float(),
+        13.0
+    );
 }
 
 #[test]
 fn operator_precedence_and_public_list_type_are_stable() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         let logic = false || true && false;
         let math = 1 + 2 * 3;
         let c = 0;
@@ -94,18 +93,18 @@ fn operator_precedence_and_public_list_type_are_stable() {
             0
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 1),
-        other => panic!("expected integer 1, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        1
+    );
 }
 
 #[test]
 fn map_literal_can_be_implicit_tail_return_value() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         fn result() {
             {ok: true, value: 42, error: null}
         }
@@ -116,18 +115,18 @@ fn map_literal_can_be_implicit_tail_return_value() {
             0
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 42),
-        other => panic!("expected integer 42, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        42
+    );
 }
 
 #[test]
 fn standalone_block_statement_keeps_its_own_scope() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         let value = 1;
         {
             let value = 2;
@@ -136,12 +135,93 @@ fn standalone_block_statement_keeps_its_own_scope() {
             value
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 1),
-        other => panic!("expected integer 1, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        1
+    );
+}
+
+#[test]
+fn let_redeclaration_in_same_scope_is_an_error() {
+    let err = match eval_input(
+        r#"
+        let value = 1;
+        let value = 2;
+        "#,
+    ) {
+        Ok(value) => panic!("expected redeclaration error, got {value}"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind, ErrorKind::Name);
+    assert!(
+        err.msg.contains("cannot redeclare name 'value'"),
+        "{}",
+        err.msg
+    );
+}
+
+#[test]
+fn nested_blocks_can_shadow_and_assign_outer_bindings() {
+    assert_eq!(
+        eval_input(
+            r#"
+        let value = 1;
+        if true {
+            let value = 2;
+        }
+        if true {
+            value = value + 1;
+        }
+        let i = 0;
+        while i < 2 {
+            let value = i + 10;
+            i = i + 1;
+        }
+        value * 10 + i
+        "#,
+        )
+        .unwrap()
+        .expect_integer(),
+        22
+    );
+}
+
+#[test]
+fn for_loop_variables_are_scoped_to_each_iteration_body() {
+    assert_eq!(
+        eval_input(
+            r#"
+        let total = 0;
+        for i, value in [1, 2, 3] {
+            let doubled = value * 2;
+            total = total + doubled;
+        }
+        total
+        "#,
+        )
+        .unwrap()
+        .expect_integer(),
+        12
+    );
+
+    let err = match eval_input(
+        r#"
+        for i, value in [1] {
+            let inside = value;
+        }
+        i
+        "#,
+    ) {
+        Ok(value) => panic!("expected scoped loop variable error, got {value}"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind, ErrorKind::Name);
+    assert!(
+        err.msg.contains("not found variable name 'i'"),
+        "{}",
+        err.msg
+    );
 }
 
 #[test]
@@ -182,17 +262,15 @@ fn namespace_import_exposes_module_members() {
         "#
     );
 
-    match eval_input(source.as_str()).unwrap() {
-        Object::Integer(actual) => assert_eq!(actual, 3),
-        other => panic!("expected integer 3, got {other}"),
-    }
+    assert_eq!(eval_input(source.as_str()).unwrap().expect_integer(), 3);
     let _ = fs::remove_file(path);
 }
 
 #[test]
 fn assignment_statement_handles_identifier_index_and_member_targets() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         let x = 1;
         x = 2;
         let data = {items: [0, 0, 0]};
@@ -205,18 +283,42 @@ fn assignment_statement_handles_identifier_index_and_member_targets() {
             0
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 7),
-        other => panic!("expected integer 7, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        7
+    );
+}
+
+#[test]
+fn parenthesized_assignment_targets_keep_assignment_semantics() {
+    assert_eq!(
+        eval_input(
+            r#"
+        let x = 1;
+        (x) = 2;
+        let data = {items: [0, 0], name: ""};
+        let i = 0;
+        (data.items[i + 1]) = x + 3;
+        (data.name) = "ok";
+        if data.name == "ok" {
+            data.items[1]
+        } else {
+            0
+        }
+        "#,
+        )
+        .unwrap()
+        .expect_integer(),
+        5
+    );
 }
 
 #[test]
 fn struct_definition_initialization_and_assignment_work() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         struct User {
             name;
             age;
@@ -230,12 +332,11 @@ fn struct_definition_initialization_and_assignment_work() {
             0
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 19),
-        other => panic!("expected integer 19, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        19
+    );
 }
 
 #[test]
@@ -266,8 +367,9 @@ fn struct_definition_requires_semicolon_after_each_field() {
 
 #[test]
 fn struct_positional_initialization_uses_field_order() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         struct User {
             name;
             age;
@@ -279,12 +381,11 @@ fn struct_positional_initialization_uses_field_order() {
             0
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 18),
-        other => panic!("expected integer 18, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        18
+    );
 }
 
 #[test]
@@ -318,73 +419,74 @@ fn struct_literal_rejects_mixed_named_and_positional_fields() {
 
 #[test]
 fn builtin_functions_can_be_stored_and_called() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         let to_text = str;
         to_text(12)
         "#,
-    )
-    .unwrap()
-    {
-        Object::String(actual) => assert_eq!(actual, "12"),
-        other => panic!("expected string 12, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_string(),
+        "12"
+    );
 }
 
 #[test]
 fn struct_instances_can_be_reassigned() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         struct User { name; }
         let user = User{name: "a"};
         user = User{name: "b"};
         user.name
         "#,
-    )
-    .unwrap()
-    {
-        Object::String(actual) => assert_eq!(actual, "b"),
-        other => panic!("expected string b, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_string(),
+        "b"
+    );
 }
 
 #[test]
 fn struct_fields_can_change_runtime_type() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         struct User { age; }
         let user = User{age: 18};
         user.age = "18";
         user.age
         "#,
-    )
-    .unwrap()
-    {
-        Object::String(actual) => assert_eq!(actual, "18"),
-        other => panic!("expected string 18, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_string(),
+        "18"
+    );
 }
 
 #[test]
 fn assignment_allows_dynamic_type_changes() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         let value = 1;
         value = "1";
         value
         "#,
-    )
-    .unwrap()
-    {
-        Object::String(actual) => assert_eq!(actual, "1"),
-        other => panic!("expected string 1, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_string(),
+        "1"
+    );
 }
 
 #[test]
 fn struct_missing_fields_default_to_null() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         struct User { name; age; }
         let user = User{name: "tom"};
         if user.age == null {
@@ -393,12 +495,11 @@ fn struct_missing_fields_default_to_null() {
             0
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 1),
-        other => panic!("expected integer 1, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        1
+    );
 }
 
 #[test]
@@ -449,8 +550,9 @@ fn struct_rejects_unknown_field_reads() {
 
 #[test]
 fn struct_literal_is_allowed_inside_condition_call_arguments() {
-    match eval_input(
-        r#"
+    assert_eq!(
+        eval_input(
+            r#"
         struct User { name; }
         fn ok(user) {
             user.name == "tom"
@@ -461,12 +563,11 @@ fn struct_literal_is_allowed_inside_condition_call_arguments() {
             0
         }
         "#,
-    )
-    .unwrap()
-    {
-        Object::Integer(actual) => assert_eq!(actual, 1),
-        other => panic!("expected integer 1, got {other}"),
-    }
+        )
+        .unwrap()
+        .expect_integer(),
+        1
+    );
 }
 
 #[test]
@@ -489,10 +590,7 @@ fn alias_and_bare_import_share_cache_without_reexecuting() {
         "#
     );
 
-    match eval_input(source.as_str()).unwrap() {
-        Object::Integer(actual) => assert_eq!(actual, 2),
-        other => panic!("expected integer 2, got {other}"),
-    }
+    assert_eq!(eval_input(source.as_str()).unwrap().expect_integer(), 2);
     let _ = fs::remove_file(path);
 }
 
@@ -513,10 +611,7 @@ fn cached_bare_import_injects_exports_into_each_scope() {
         "#
     );
 
-    match eval_input(source.as_str()).unwrap() {
-        Object::Integer(actual) => assert_eq!(actual, 7),
-        other => panic!("expected integer 7, got {other}"),
-    }
+    assert_eq!(eval_input(source.as_str()).unwrap().expect_integer(), 7);
     let _ = fs::remove_file(path);
 }
 
@@ -572,8 +667,7 @@ fn namespace_import_struct_can_be_instantiated_with_qualified_name() {
     );
 
     match eval_input(source.as_str()) {
-        Ok(Object::String(actual)) => assert_eq!(actual, "tom:18"),
-        Ok(value) => panic!("expected string tom:18, got {value}"),
+        Ok(value) => assert_eq!(value.expect_string(), "tom:18"),
         Err(err) => panic!("expected qualified struct literal to evaluate, got {err}"),
     }
     let _ = fs::remove_file(path);
@@ -599,10 +693,7 @@ fn bare_import_respects_explicit_exports() {
         "#
     );
 
-    match eval_input(source.as_str()).unwrap() {
-        Object::Integer(actual) => assert_eq!(actual, 7),
-        other => panic!("expected integer 7, got {other}"),
-    }
+    assert_eq!(eval_input(source.as_str()).unwrap().expect_integer(), 7);
 
     let private_source = format!(
         r#"
@@ -647,8 +738,7 @@ fn modules_without_explicit_exports_do_not_export_bindings() {
 #[test]
 fn crlf_source_parses_like_lf_source() {
     match eval_input("let x = 1;\r\nlet y = 2;\r\nx + y") {
-        Ok(Object::Integer(actual)) => assert_eq!(actual, 3),
-        Ok(value) => panic!("expected integer 3, got {value}"),
+        Ok(value) => assert_eq!(value.expect_integer(), 3),
         Err(err) => panic!("expected CRLF source to parse, got {err}"),
     }
 }
@@ -685,9 +775,57 @@ fn file_failures_return_result_instead_of_runtime_error() {
     );
 
     match eval_input(source.as_str()) {
-        Ok(Object::Integer(actual)) => assert_eq!(actual, 1),
-        Ok(value) => panic!("expected integer 1, got {value}"),
+        Ok(value) => assert_eq!(value.expect_integer(), 1),
         Err(err) => panic!("expected result object, got error {err}"),
+    }
+}
+
+#[test]
+fn recoverable_stdlib_failures_use_standard_result_shape() {
+    let missing = temp_file_path("missing_standard_result_shape.txt");
+    let missing_literal = monkey_string_literal(missing.as_str());
+    let source = format!(
+        r#"
+        import fs from "stdlib/fs.monkey";
+        import json from "stdlib/json.monkey";
+        import process from "stdlib/process.monkey";
+        let parsed = parse_int("abc");
+        let file = fs.read_file({missing_literal});
+        let data = json.json_parse("{{bad");
+        let command = __NONZERO_EXEC__;
+        let parsed_ok = parse_int("42");
+        if parsed_ok.ok &&
+            parsed_ok.value == 42 &&
+            parsed_ok.error == null &&
+            !parsed.ok &&
+            parsed.value == null &&
+            parsed.error.kind == "parse" &&
+            parsed.error.code == "invalid_int" &&
+            is_string(parsed.error.message) &&
+            !file.ok &&
+            file.value == null &&
+            file.error.kind == "io" &&
+            file.error.code == "not_found" &&
+            is_string(file.error.message) &&
+            !data.ok &&
+            data.value == null &&
+            data.error.kind == "parse" &&
+            is_string(data.error.code) &&
+            is_string(data.error.message) &&
+            command.ok &&
+            command.error == null &&
+            !command.value.success {{
+            1
+        }} else {{
+            0
+        }}
+        "#
+    )
+    .replace("__NONZERO_EXEC__", nonzero_exec_expression());
+
+    match eval_input(source.as_str()) {
+        Ok(value) => assert_eq!(value.expect_integer(), 1),
+        Err(err) => panic!("expected standard result objects, got error {err}"),
     }
 }
 
@@ -705,8 +843,7 @@ fn exec_nonzero_status_is_successful_result_value() {
     .replace("__NONZERO_EXEC__", nonzero_exec_expression());
 
     match eval_input(source.as_str()) {
-        Ok(Object::Integer(actual)) => assert_eq!(actual, 7),
-        Ok(value) => panic!("expected integer 7, got {value}"),
+        Ok(value) => assert_eq!(value.expect_integer(), 7),
         Err(err) => panic!("expected exec result object, got error {err}"),
     }
 }
@@ -725,8 +862,7 @@ fn json_parse_returns_standard_result() {
         }
         "#,
     ) {
-        Ok(Object::Integer(actual)) => assert_eq!(actual, 1),
-        Ok(value) => panic!("expected integer 1, got {value}"),
+        Ok(value) => assert_eq!(value.expect_integer(), 1),
         Err(err) => panic!("expected json result objects, got error {err}"),
     }
 }
@@ -736,11 +872,10 @@ fn json_parse_number_errors_stay_in_result() {
     match eval_input(
         r#"
         import json from "stdlib/json.monkey";
-        let overflow = json.json_parse("999999999999999999999999999999999999");
+        let large = json.json_parse("999999999999999999999999999999999999");
         let exponent = json.json_parse("1.5e2");
         let leading_zero = json.json_parse("01");
-        if !overflow.ok &&
-            overflow.error.kind == "parse" &&
+        if large.ok &&
             exponent.ok &&
             exponent.value == 150.0 &&
             !leading_zero.ok {
@@ -750,8 +885,7 @@ fn json_parse_number_errors_stay_in_result() {
         }
         "#,
     ) {
-        Ok(Object::Integer(actual)) => assert_eq!(actual, 1),
-        Ok(value) => panic!("expected integer 1, got {value}"),
+        Ok(value) => assert_eq!(value.expect_integer(), 1),
         Err(err) => panic!("expected json result objects, got error {err}"),
     }
 }
@@ -775,8 +909,7 @@ fn parse_number_helpers_return_result() {
         }
         "#,
     ) {
-        Ok(Object::Integer(actual)) => assert_eq!(actual, 1),
-        Ok(value) => panic!("expected integer 1, got {value}"),
+        Ok(value) => assert_eq!(value.expect_integer(), 1),
         Err(err) => panic!("expected parse result objects, got error {err}"),
     }
 }
@@ -794,8 +927,7 @@ fn http_invalid_method_returns_result_error() {
         }
         "#,
     ) {
-        Ok(Object::Integer(actual)) => assert_eq!(actual, 1),
-        Ok(value) => panic!("expected integer 1, got {value}"),
+        Ok(value) => assert_eq!(value.expect_integer(), 1),
         Err(err) => panic!("expected http result object, got error {err}"),
     }
 }

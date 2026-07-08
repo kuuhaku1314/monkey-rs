@@ -1,23 +1,29 @@
 use crate::ast::{AssignTarget, Expression, FunctionLiteral, Program, Statement};
-use crate::builtin::{new_builtin_function_map, new_global_builtin_function_map};
 use crate::error::Error;
-use crate::formatter::format_program;
+use crate::formatter::format_source;
+use crate::lang_service_builtins::builtin_signature;
 use crate::lexer::{new_lexer, Span};
 use crate::parser::new_parser;
-use std::collections::BTreeMap;
+use crate::vm::{builtin_names, global_builtin_names};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn format_source_for_editor(source: &str, path: Option<String>) -> Result<String, Error> {
-    let program = parse_program(source, path)?;
-    Ok(format_program(&program))
+    format_source(source, path)
 }
 
 pub fn diagnostics_json(source: &str, path: Option<String>) -> String {
     match parse_program(source, path) {
-        Ok(_) => "{\"diagnostics\":[]}".to_string(),
+        Ok(program) => {
+            let diagnostics = semantic_diagnostics(&program)
+                .into_iter()
+                .map(|diagnostic| diagnostic.to_json())
+                .collect::<Vec<_>>();
+            format!("{{\"diagnostics\":[{}]}}", diagnostics.join(","))
+        }
         Err(err) => {
-            let diagnostic = diagnostic_json(&err);
+            let diagnostic = Diagnostic::from_error(&err).to_json();
             format!("{{\"diagnostics\":[{diagnostic}]}}")
         }
     }
@@ -46,8 +52,18 @@ pub fn completion_json(
             .collect::<BTreeMap<_, _>>();
         return completions_json(symbols.values());
     }
+    if let Some(context) = struct_literal_field_context(source, line, character) {
+        if let Some(completions) = struct_literal_field_completions(source, path.clone(), &context)
+        {
+            let symbols = completions
+                .into_iter()
+                .map(|symbol| (symbol.label.clone(), symbol))
+                .collect::<BTreeMap<_, _>>();
+            return completions_json(symbols.values());
+        }
+    }
     let Some(context) = member_context(source, line, character) else {
-        return symbols_json(source, path);
+        return positioned_symbols_json(source, path, SourcePosition::from_lsp(line, character));
     };
     let byte_offset = context.byte_offset;
     let repaired_source = format!(
@@ -71,6 +87,37 @@ pub fn completion_json(
         .map(|symbol| (symbol.label.clone(), symbol))
         .collect::<BTreeMap<_, _>>();
     completions_json(symbols.values())
+}
+
+fn positioned_symbols_json(source: &str, path: Option<String>, position: SourcePosition) -> String {
+    let mut symbols = builtin_symbols();
+    collect_keyword_symbols(&mut symbols);
+    match parse_program_for_completion(source, path, position) {
+        Ok(program) => collect_visible_program_symbols(&program, &mut symbols, position),
+        Err(_) => collect_text_symbols(source, &mut symbols),
+    }
+    completions_json(symbols.values())
+}
+
+fn parse_program_for_completion(
+    source: &str,
+    path: Option<String>,
+    position: SourcePosition,
+) -> Result<Program, Error> {
+    parse_program(source, path.clone()).or_else(|_| {
+        let byte_offset = position_to_byte_offset(
+            source,
+            position.line.saturating_sub(1),
+            position.character.saturating_sub(1),
+        )
+        .ok_or_else(|| Error::new("invalid completion position".to_string()))?;
+        let repaired_source = format!(
+            "{}__completion{}",
+            &source[..byte_offset],
+            &source[byte_offset..]
+        );
+        parse_program(&repaired_source, path)
+    })
 }
 
 pub fn definition_json(
@@ -178,7 +225,7 @@ fn reference_at(source: &str, line: usize, character: usize) -> Option<Reference
             break;
         }
         let receiver_end = path_start - 1;
-        let receiver_range = identifier_range_ending_at(line_text, receiver_end)?;
+        let receiver_range = expression_range_ending_at(line_text, receiver_end)?;
         path_start = receiver_range.0;
     }
 
@@ -193,35 +240,20 @@ fn reference_at(source: &str, line: usize, character: usize) -> Option<Reference
         path_end = member_range.1;
     }
 
-    let mut word_index = None;
-    let path = line_text
-        .get(path_start..path_end)?
-        .split('.')
-        .enumerate()
-        .scan(path_start, |start, (index, part)| {
-            let end = *start + part.len();
-            let range = (*start, end);
-            *start = end + 1;
-            Some((index, range, part))
-        })
-        .map(|(index, range, part)| {
-            if range == word_range {
-                word_index = Some(index);
-            }
-            let first = part.chars().next()?;
-            if !is_identifier_start(first) || !part.chars().all(is_identifier_continue) {
-                return None;
-            }
-            Some(part.to_string())
-        })
-        .collect::<Option<Vec<_>>>()?;
+    let path_text = line_text.get(path_start..path_end)?;
+    let path = expression_text_path(path_text)?;
+    let relative_word_range = (
+        word_range.0.saturating_sub(path_start),
+        word_range.1.saturating_sub(path_start),
+    );
+    let word_index = identifier_ranges_in_text(path_text)
+        .into_iter()
+        .position(|range| range == relative_word_range)
+        .unwrap_or(0);
     if path.is_empty() {
         None
     } else {
-        Some(Reference {
-            path,
-            word_index: word_index.unwrap_or(0),
-        })
+        Some(Reference { path, word_index })
     }
 }
 
@@ -254,24 +286,30 @@ fn identifier_range_at(line: &str, offset: usize) -> Option<(usize, usize)> {
     is_identifier_start(first).then_some((start, end))
 }
 
-fn identifier_range_ending_at(line: &str, end: usize) -> Option<(usize, usize)> {
+fn expression_range_ending_at(line: &str, end: usize) -> Option<(usize, usize)> {
+    let end = trim_end_offset(line, end);
     if end == 0 || end > line.len() || !line.is_char_boundary(end) {
         return None;
     }
+    if let Some((close_index, ')')) = line[..end].char_indices().next_back() {
+        let open_index = matching_open_paren(line, close_index)?;
+        let text = line.get(open_index..end)?;
+        expression_text_path(text)?;
+        return Some((open_index, end));
+    }
+
     let mut start = end;
     while start > 0 {
         let (index, ch) = line[..start].char_indices().next_back()?;
-        if is_identifier_continue(ch) {
+        if is_identifier_continue(ch) || ch == '.' {
             start = index;
         } else {
             break;
         }
     }
-    if start == end {
-        return None;
-    }
-    let first = line[start..end].chars().next()?;
-    is_identifier_start(first).then_some((start, end))
+    let text = line.get(start..end)?;
+    expression_text_path(text)?;
+    Some((start, end))
 }
 
 fn identifier_range_starting_at(line: &str, start: usize) -> Option<(usize, usize)> {
@@ -303,6 +341,256 @@ struct MemberContext {
     path: Vec<String>,
     byte_offset: usize,
     position: SourcePosition,
+}
+
+struct StructLiteralFieldContext {
+    type_name: String,
+    used_fields: BTreeSet<String>,
+    open_brace_offset: usize,
+    byte_offset: usize,
+    position: SourcePosition,
+}
+
+fn struct_literal_field_context(
+    source: &str,
+    line: usize,
+    character: usize,
+) -> Option<StructLiteralFieldContext> {
+    let byte_offset = position_to_byte_offset(source, line, character)?;
+    let open_brace_offset = unmatched_open_brace_before(source, byte_offset)?;
+    let type_name = struct_literal_type_path_before_brace(source, open_brace_offset)?;
+    let used_fields = struct_literal_used_fields(source.get(open_brace_offset + 1..byte_offset)?);
+    Some(StructLiteralFieldContext {
+        type_name,
+        used_fields,
+        open_brace_offset,
+        byte_offset,
+        position: SourcePosition::from_lsp(line, character),
+    })
+}
+
+fn struct_literal_field_completions(
+    source: &str,
+    path: Option<String>,
+    context: &StructLiteralFieldContext,
+) -> Option<Vec<Symbol>> {
+    let repaired = repair_struct_literal_for_parsing(source, context);
+    let program = parse_program(&repaired, path.clone())
+        .or_else(|_| {
+            parse_program(
+                source.get(..context.open_brace_offset).unwrap_or(source),
+                path.clone(),
+            )
+        })
+        .ok()?;
+    let fields = collect_visible_struct_fields(&program, path.as_deref(), Some(context.position));
+    let field_names = fields.get(context.type_name.as_str())?;
+    Some(
+        field_names
+            .iter()
+            .filter(|field| !context.used_fields.contains(field.as_str()))
+            .map(|field| Symbol {
+                label: field.to_string(),
+                kind: SymbolKind::Field,
+                detail: format!("field {}.{field}", context.type_name),
+            })
+            .collect(),
+    )
+}
+
+fn repair_struct_literal_for_parsing(source: &str, context: &StructLiteralFieldContext) -> String {
+    let suffix_start = matching_closing_brace(source, context.open_brace_offset)
+        .filter(|close| *close >= context.byte_offset)
+        .map(|close| close + 1)
+        .unwrap_or(context.byte_offset);
+    let suffix = &source[suffix_start..];
+    let separator = struct_literal_repair_separator(suffix);
+    format!(
+        "{}{{}}{}{}",
+        &source[..context.open_brace_offset],
+        separator,
+        suffix
+    )
+}
+
+fn struct_literal_repair_separator(suffix: &str) -> &'static str {
+    match suffix.trim_start().chars().next() {
+        Some(';') | Some(',') | Some(')') | Some(']') | Some('}') => "",
+        _ => ";",
+    }
+}
+
+fn struct_literal_type_path_before_brace(source: &str, brace_offset: usize) -> Option<String> {
+    let before_brace = source.get(..brace_offset)?;
+    let mut end = brace_offset;
+    for (index, ch) in before_brace.char_indices().rev() {
+        if ch.is_whitespace() {
+            end = index;
+        } else {
+            break;
+        }
+    }
+    let mut start = end;
+    for (index, ch) in before_brace.get(..end)?.char_indices().rev() {
+        if is_identifier_continue(ch) || ch == '.' {
+            start = index;
+        } else {
+            break;
+        }
+    }
+    let path = before_brace.get(start..end)?;
+    validate_type_path(path).then(|| path.to_string())
+}
+
+fn validate_type_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.split('.').all(|part| {
+            let Some(first) = part.chars().next() else {
+                return false;
+            };
+            is_identifier_start(first) && part.chars().all(is_identifier_continue)
+        })
+}
+
+fn unmatched_open_brace_before(source: &str, byte_offset: usize) -> Option<usize> {
+    let mut stack = Vec::new();
+    let mut scanner = SourceScanner::new(source.get(..byte_offset)?);
+    while let Some((index, ch)) = scanner.next_code_char() {
+        match ch {
+            '{' => stack.push(index),
+            '}' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack.pop()
+}
+
+fn matching_closing_brace(source: &str, open_brace_offset: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut scanner = SourceScanner::new(source.get(open_brace_offset..)?);
+    while let Some((relative_index, ch)) = scanner.next_code_char() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open_brace_offset + relative_index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn struct_literal_used_fields(content: &str) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    let mut scanner = SourceScanner::new(content);
+    let mut nesting = 0usize;
+    while let Some((index, ch)) = scanner.next_code_char() {
+        match ch {
+            '(' | '[' | '{' => nesting += 1,
+            ')' | ']' | '}' => nesting = nesting.saturating_sub(1),
+            _ if nesting == 0 && is_identifier_start(ch) => {
+                let name_end = identifier_end(content, index + ch.len_utf8());
+                if next_non_whitespace_char(content, name_end) == Some(':') {
+                    fields.insert(content[index..name_end].to_string());
+                }
+                scanner.skip_to(name_end);
+            }
+            _ => {}
+        }
+    }
+    fields
+}
+
+fn identifier_end(source: &str, mut end: usize) -> usize {
+    while end < source.len() {
+        let Some(ch) = source[end..].chars().next() else {
+            break;
+        };
+        if !is_identifier_continue(ch) {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+    end
+}
+
+fn next_non_whitespace_char(source: &str, mut offset: usize) -> Option<char> {
+    while offset < source.len() {
+        let ch = source[offset..].chars().next()?;
+        if !ch.is_whitespace() {
+            return Some(ch);
+        }
+        offset += ch.len_utf8();
+    }
+    None
+}
+
+struct SourceScanner<'a> {
+    source: &'a str,
+    offset: usize,
+}
+
+impl<'a> SourceScanner<'a> {
+    fn new(source: &'a str) -> Self {
+        Self { source, offset: 0 }
+    }
+
+    fn skip_to(&mut self, offset: usize) {
+        self.offset = self.source.len().min(offset);
+    }
+
+    fn next_code_char(&mut self) -> Option<(usize, char)> {
+        while self.offset < self.source.len() {
+            let index = self.offset;
+            let ch = self.source[index..].chars().next()?;
+            if ch == '"' {
+                self.skip_string();
+                continue;
+            }
+            if ch == '/' && self.source[index + ch.len_utf8()..].starts_with('/') {
+                self.skip_line_comment();
+                continue;
+            }
+            self.offset += ch.len_utf8();
+            return Some((index, ch));
+        }
+        None
+    }
+
+    fn skip_string(&mut self) {
+        self.offset += 1;
+        let mut escaped = false;
+        while self.offset < self.source.len() {
+            let Some(ch) = self.source[self.offset..].chars().next() else {
+                break;
+            };
+            self.offset += ch.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                break;
+            }
+        }
+    }
+
+    fn skip_line_comment(&mut self) {
+        while self.offset < self.source.len() {
+            let Some(ch) = self.source[self.offset..].chars().next() else {
+                break;
+            };
+            self.offset += ch.len_utf8();
+            if ch == '\n' {
+                break;
+            }
+        }
+    }
 }
 
 fn member_context(source: &str, line: usize, character: usize) -> Option<MemberContext> {
@@ -339,25 +627,113 @@ impl SourcePosition {
 
 fn member_path(prefix: &str) -> Option<Vec<String>> {
     let before_dot = prefix.strip_suffix('.')?;
-    let mut start = before_dot.len();
-    for (index, ch) in before_dot.char_indices().rev() {
-        if is_identifier_continue(ch) || ch == '.' {
-            start = index;
-        } else {
-            break;
+    let (start, end) = expression_range_ending_at(before_dot, before_dot.len())?;
+    expression_text_path(before_dot.get(start..end)?)
+}
+
+fn expression_text_path(text: &str) -> Option<Vec<String>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(inner) = fully_parenthesized_inner(text) {
+        return expression_text_path(inner);
+    }
+    if let Some(dot_index) = last_top_level_dot(text) {
+        let mut path = expression_text_path(text.get(..dot_index)?)?;
+        path.push(identifier_text(text.get(dot_index + 1..)?)?);
+        return Some(path);
+    }
+    Some(vec![identifier_text(text)?])
+}
+
+fn fully_parenthesized_inner(text: &str) -> Option<&str> {
+    let (close_index, ')') = text.char_indices().next_back()? else {
+        return None;
+    };
+    let open_index = matching_open_paren(text, close_index)?;
+    (text.get(..open_index)?.trim().is_empty() && close_index + 1 == text.len())
+        .then(|| text.get(open_index + 1..close_index))
+        .flatten()
+}
+
+fn last_top_level_dot(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => depth = depth.checked_sub(1)?,
+            '.' if depth == 0 => return Some(index),
+            _ => {}
         }
     }
-    before_dot
-        .get(start..)?
-        .split('.')
-        .map(|part| {
-            let first = part.chars().next()?;
-            if !is_identifier_start(first) || !part.chars().all(is_identifier_continue) {
-                return None;
+    None
+}
+
+fn matching_open_paren(text: &str, close_index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, ch) in text.get(..=close_index)?.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
             }
-            Some(part.to_string())
-        })
-        .collect()
+            _ => {}
+        }
+    }
+    None
+}
+
+fn identifier_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    let first = text.chars().next()?;
+    if !is_identifier_start(first) || !text.chars().all(is_identifier_continue) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+fn identifier_ranges_in_text(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let Some(ch) = text[offset..].chars().next() else {
+            break;
+        };
+        if is_identifier_start(ch) {
+            let start = offset;
+            offset += ch.len_utf8();
+            while offset < text.len() {
+                let Some(ch) = text[offset..].chars().next() else {
+                    break;
+                };
+                if !is_identifier_continue(ch) {
+                    break;
+                }
+                offset += ch.len_utf8();
+            }
+            ranges.push((start, offset));
+        } else {
+            offset += ch.len_utf8();
+        }
+    }
+    ranges
+}
+
+fn trim_end_offset(text: &str, mut end: usize) -> usize {
+    while end > 0 {
+        let Some((index, ch)) = text[..end].char_indices().next_back() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        end = index;
+    }
+    end
 }
 
 fn position_to_byte_offset(source: &str, line: usize, character: usize) -> Option<usize> {
@@ -569,6 +945,15 @@ fn definition_for_reference(
     reference: &Reference,
     position: SourcePosition,
 ) -> Option<Definition> {
+    if reference.path.len() > 1 && reference.word_index == 0 {
+        if let Some(receiver) = reference.path.first() {
+            if let Some(definition) =
+                import_alias_definition(program, current_path, receiver, position)
+            {
+                return Some(definition);
+            }
+        }
+    }
     if reference.path.len() == 1 || reference.word_index == 0 {
         let name = reference.path[0].as_str();
         if let Some(definition) = local_definition(program, name, position) {
@@ -581,94 +966,54 @@ fn definition_for_reference(
     }
     let receiver = reference.path.first()?;
     let member = reference.path.get(reference.word_index)?;
+    if let Some(definition) = struct_field_definition(program, current_path, reference, position) {
+        return Some(definition);
+    }
     namespace_import_definition(program, current_path, receiver, member, position)
 }
 
-fn local_definition(program: &Program, name: &str, position: SourcePosition) -> Option<Definition> {
-    let mut definitions = Vec::new();
-    for statement in &program.statements {
-        collect_local_definitions(statement, name, Some(position), &mut definitions);
+fn struct_field_definition(
+    program: &Program,
+    current_path: Option<&str>,
+    reference: &Reference,
+    position: SourcePosition,
+) -> Option<Definition> {
+    if reference.word_index == 0 || reference.path.len() <= reference.word_index {
+        return None;
     }
-    definitions
-        .into_iter()
-        .filter(|definition| span_starts_before_or_at(definition.span, position))
-        .max_by_key(|definition| {
-            (
-                definition.span.start.0,
-                definition.span.start.1,
-                definition.span.end.0,
-                definition.span.end.1,
-            )
-        })
+    let receiver_path = reference.path.get(..reference.word_index)?;
+    let field = reference.path.get(reference.word_index)?;
+    let struct_fields = collect_visible_struct_fields(program, current_path, Some(position));
+    let variable_shapes = collect_variable_shapes(program, Some(position));
+    let receiver_shape = resolve_shape_path(receiver_path, &variable_shapes, &struct_fields)?;
+    let ValueShape::Struct(struct_name) = receiver_shape else {
+        return None;
+    };
+    collect_visible_struct_field_definitions(program, current_path, Some(position))
+        .get(&struct_name)
+        .and_then(|fields| fields.get(field))
+        .cloned()
 }
 
-fn collect_local_definitions(
-    statement: &Statement,
-    name: &str,
-    position: Option<SourcePosition>,
-    definitions: &mut Vec<Definition>,
-) {
-    if statement_starts_after(statement, position) {
-        return;
-    }
-    match statement {
-        Statement::Let(statement) if statement.name.name == name => {
-            definitions.push(current_file_definition(statement.name.span));
-        }
-        Statement::Struct(statement) if statement.name.name == name => {
-            definitions.push(current_file_definition(statement.name.span));
-        }
-        Statement::Expression(statement) => {
-            if let Expression::Function(function) = &statement.expression {
-                if let Some(function_name) = &function.name {
-                    if function_name.name == name {
-                        definitions.push(current_file_definition(function_name.span));
-                    }
-                }
-                for parameter in &function.parameters {
-                    if parameter.name == name {
-                        definitions.push(current_file_definition(parameter.span));
-                    }
-                }
-                for statement in &function.body.statements {
-                    collect_local_definitions(statement, name, position, definitions);
-                }
-            }
-        }
-        Statement::Block(block) => {
-            for statement in &block.statements {
-                collect_local_definitions(statement, name, position, definitions);
-            }
-        }
-        Statement::While(statement) => {
-            for statement in &statement.consequence.statements {
-                collect_local_definitions(statement, name, position, definitions);
-            }
-        }
-        Statement::ForIn(statement) => {
-            if statement.key.name == name {
-                definitions.push(current_file_definition(statement.key.span));
-            }
-            if let Some(value) = &statement.value {
-                if value.name == name {
-                    definitions.push(current_file_definition(value.span));
-                }
-            }
-            for statement in &statement.body.statements {
-                collect_local_definitions(statement, name, position, definitions);
-            }
-        }
-        _ => {}
-    }
+fn local_definition(program: &Program, name: &str, position: SourcePosition) -> Option<Definition> {
+    let mut collector = IdentifierReferenceCollector::new();
+    collector.collect_statements(&program.statements);
+    collector
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.name == name && span_contains_position(occurrence.span, Some(position))
+        })
+        .and_then(|occurrence| occurrence.declaration)
+        .map(current_file_definition)
 }
 
 fn current_file_definition(span: Span) -> Definition {
     Definition { path: None, span }
 }
 
-fn span_starts_before_or_at(span: Span, position: SourcePosition) -> bool {
-    span.start.0 < position.line
-        || (span.start.0 == position.line && span.start.1 <= position.character)
+fn span_ends_before_or_at(span: Span, position: SourcePosition) -> bool {
+    span.end.0 < position.line || (span.end.0 == position.line && span.end.1 <= position.character)
 }
 
 fn import_alias_definition(
@@ -812,6 +1157,9 @@ struct IdentifierOccurrence {
 struct IdentifierReferenceCollector {
     scopes: Vec<BTreeMap<String, Span>>,
     occurrences: Vec<IdentifierOccurrence>,
+    current_path: Option<String>,
+    collect_bare_import_exports: bool,
+    allow_builtin_exports: bool,
 }
 
 impl IdentifierReferenceCollector {
@@ -819,7 +1167,24 @@ impl IdentifierReferenceCollector {
         Self {
             scopes: vec![BTreeMap::new()],
             occurrences: Vec::new(),
+            current_path: None,
+            collect_bare_import_exports: false,
+            allow_builtin_exports: false,
         }
+    }
+
+    fn for_diagnostics(program: &Program) -> Self {
+        let mut collector = Self {
+            scopes: vec![BTreeMap::new()],
+            occurrences: Vec::new(),
+            current_path: program.path.clone(),
+            collect_bare_import_exports: true,
+            allow_builtin_exports: true,
+        };
+        for name in global_builtin_names() {
+            collector.declare_visible_name(name, program_span_start(program));
+        }
+        collector
     }
 
     fn collect_statements(&mut self, statements: &[Statement]) {
@@ -851,17 +1216,27 @@ impl IdentifierReferenceCollector {
             Statement::Import(statement) => {
                 if let Some(alias) = &statement.alias {
                     self.declare(alias);
+                } else if self.collect_bare_import_exports {
+                    for symbol in
+                        module_exports(self.current_path.as_deref(), statement.path.value.as_str())
+                    {
+                        self.declare_visible_name(symbol.label.as_str(), statement.span);
+                    }
                 }
             }
             Statement::Export(statement) => {
-                self.use_identifier(&statement.name);
+                if !self.allow_builtin_exports || !is_builtin_name(statement.name.name.as_str()) {
+                    self.use_identifier(&statement.name);
+                }
             }
             Statement::Struct(statement) => {
                 self.declare(&statement.name);
             }
             Statement::While(statement) => {
                 self.collect_expression(&statement.condition);
-                self.collect_statements(&statement.consequence.statements);
+                self.with_scope(|collector| {
+                    collector.collect_statements(&statement.consequence.statements)
+                });
             }
             Statement::Assign(statement) => {
                 self.collect_assign_target(&statement.target);
@@ -869,12 +1244,14 @@ impl IdentifierReferenceCollector {
             }
             Statement::ForIn(statement) => {
                 self.collect_expression(&statement.collection);
-                self.declare(&statement.key);
-                if let Some(value) = &statement.value {
-                    self.declare(value);
-                }
                 self.with_scope(|collector| {
-                    collector.collect_statements(&statement.body.statements)
+                    collector.declare(&statement.key);
+                    if let Some(value) = &statement.value {
+                        collector.declare(value);
+                    }
+                    collector.with_scope(|collector| {
+                        collector.collect_statements(&statement.body.statements)
+                    });
                 });
             }
             Statement::Empty(_) | Statement::Break(_) | Statement::Continue(_) => {}
@@ -916,9 +1293,13 @@ impl IdentifierReferenceCollector {
             Expression::Identifier(identifier) => self.use_identifier(identifier),
             Expression::If(expression) => {
                 self.collect_expression(&expression.condition);
-                self.collect_statements(&expression.consequence.statements);
+                self.with_scope(|collector| {
+                    collector.collect_statements(&expression.consequence.statements)
+                });
                 if let Some(alternative) = &expression.alternative {
-                    self.collect_statements(&alternative.statements);
+                    self.with_scope(|collector| {
+                        collector.collect_statements(&alternative.statements)
+                    });
                 }
                 if let Some(optional) = &expression.optional {
                     self.collect_expression(optional);
@@ -930,6 +1311,9 @@ impl IdentifierReferenceCollector {
             }
             Expression::Prefix(expression) => {
                 self.collect_expression(&expression.right);
+            }
+            Expression::Grouped(expression) => {
+                self.collect_expression(&expression.expression);
             }
             Expression::Slice(slice) => {
                 for element in &slice.elements {
@@ -975,6 +1359,12 @@ impl IdentifierReferenceCollector {
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(identifier.name.to_string(), identifier.span);
+        }
+    }
+
+    fn declare_visible_name(&mut self, name: &str, span: Span) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), span);
         }
     }
 
@@ -1025,6 +1415,272 @@ fn scoped_identifier_references(
         .filter(|occurrence| include_declaration || !occurrence.is_declaration)
         .map(|occurrence| current_file_definition(occurrence.span))
         .collect()
+}
+
+fn semantic_diagnostics(program: &Program) -> Vec<Diagnostic> {
+    let mut collector = IdentifierReferenceCollector::for_diagnostics(program);
+    collector.collect_statements(&program.statements);
+    let mut diagnostics = collector
+        .occurrences
+        .into_iter()
+        .filter(|occurrence| !occurrence.is_declaration && occurrence.declaration.is_none())
+        .map(|occurrence| Diagnostic::undefined_identifier(occurrence.name, occurrence.span))
+        .collect::<Vec<_>>();
+    diagnostics.extend(struct_literal_field_diagnostics(program));
+    diagnostics
+}
+
+fn is_builtin_name(name: &str) -> bool {
+    builtin_names().contains(&name)
+}
+
+fn program_span_start(program: &Program) -> Span {
+    program
+        .statements
+        .first()
+        .map(Statement::span)
+        .unwrap_or_else(|| Span::point(crate::lexer::Position(1, 1)))
+}
+
+fn struct_literal_field_diagnostics(program: &Program) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for statement in &program.statements {
+        collect_statement_struct_literal_field_diagnostics(statement, program, &mut diagnostics);
+    }
+    diagnostics
+}
+
+fn collect_statement_struct_literal_field_diagnostics(
+    statement: &Statement,
+    program: &Program,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match statement {
+        Statement::Block(block) => {
+            for statement in &block.statements {
+                collect_statement_struct_literal_field_diagnostics(statement, program, diagnostics);
+            }
+        }
+        Statement::Expression(statement) => collect_expression_struct_literal_field_diagnostics(
+            &statement.expression,
+            program,
+            diagnostics,
+        ),
+        Statement::Let(statement) => collect_expression_struct_literal_field_diagnostics(
+            &statement.value,
+            program,
+            diagnostics,
+        ),
+        Statement::Return(statement) => collect_expression_struct_literal_field_diagnostics(
+            &statement.value,
+            program,
+            diagnostics,
+        ),
+        Statement::While(statement) => {
+            collect_expression_struct_literal_field_diagnostics(
+                &statement.condition,
+                program,
+                diagnostics,
+            );
+            for statement in &statement.consequence.statements {
+                collect_statement_struct_literal_field_diagnostics(statement, program, diagnostics);
+            }
+        }
+        Statement::Assign(statement) => {
+            collect_assign_target_struct_literal_field_diagnostics(
+                &statement.target,
+                program,
+                diagnostics,
+            );
+            collect_expression_struct_literal_field_diagnostics(
+                &statement.value,
+                program,
+                diagnostics,
+            );
+        }
+        Statement::ForIn(statement) => {
+            collect_expression_struct_literal_field_diagnostics(
+                &statement.collection,
+                program,
+                diagnostics,
+            );
+            for statement in &statement.body.statements {
+                collect_statement_struct_literal_field_diagnostics(statement, program, diagnostics);
+            }
+        }
+        Statement::Empty(_)
+        | Statement::Import(_)
+        | Statement::Export(_)
+        | Statement::Struct(_)
+        | Statement::Break(_)
+        | Statement::Continue(_) => {}
+    }
+}
+
+fn collect_assign_target_struct_literal_field_diagnostics(
+    target: &AssignTarget,
+    program: &Program,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match target {
+        AssignTarget::Identifier(_) => {}
+        AssignTarget::Index { left, index } => {
+            collect_expression_struct_literal_field_diagnostics(left, program, diagnostics);
+            collect_expression_struct_literal_field_diagnostics(index, program, diagnostics);
+        }
+        AssignTarget::Member { left, .. } => {
+            collect_expression_struct_literal_field_diagnostics(left, program, diagnostics);
+        }
+    }
+}
+
+fn collect_expression_struct_literal_field_diagnostics(
+    expression: &Expression,
+    program: &Program,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match expression {
+        Expression::Function(function) => {
+            for statement in &function.body.statements {
+                collect_statement_struct_literal_field_diagnostics(statement, program, diagnostics);
+            }
+        }
+        Expression::Call(call) => {
+            collect_expression_struct_literal_field_diagnostics(
+                &call.function,
+                program,
+                diagnostics,
+            );
+            for argument in &call.arguments {
+                collect_expression_struct_literal_field_diagnostics(argument, program, diagnostics);
+            }
+        }
+        Expression::If(expression) => {
+            collect_expression_struct_literal_field_diagnostics(
+                &expression.condition,
+                program,
+                diagnostics,
+            );
+            for statement in &expression.consequence.statements {
+                collect_statement_struct_literal_field_diagnostics(statement, program, diagnostics);
+            }
+            if let Some(alternative) = &expression.alternative {
+                for statement in &alternative.statements {
+                    collect_statement_struct_literal_field_diagnostics(
+                        statement,
+                        program,
+                        diagnostics,
+                    );
+                }
+            }
+            if let Some(optional) = &expression.optional {
+                collect_expression_struct_literal_field_diagnostics(optional, program, diagnostics);
+            }
+        }
+        Expression::Infix(expression) => {
+            collect_expression_struct_literal_field_diagnostics(
+                &expression.left,
+                program,
+                diagnostics,
+            );
+            collect_expression_struct_literal_field_diagnostics(
+                &expression.right,
+                program,
+                diagnostics,
+            );
+        }
+        Expression::Prefix(expression) => collect_expression_struct_literal_field_diagnostics(
+            &expression.right,
+            program,
+            diagnostics,
+        ),
+        Expression::Grouped(expression) => collect_expression_struct_literal_field_diagnostics(
+            &expression.expression,
+            program,
+            diagnostics,
+        ),
+        Expression::Slice(slice) => {
+            for element in &slice.elements {
+                collect_expression_struct_literal_field_diagnostics(element, program, diagnostics);
+            }
+        }
+        Expression::Map(map) => {
+            for (key, value) in &map.kv_pair {
+                collect_expression_struct_literal_field_diagnostics(key, program, diagnostics);
+                collect_expression_struct_literal_field_diagnostics(value, program, diagnostics);
+            }
+        }
+        Expression::StructLiteral(literal) => {
+            collect_struct_literal_field_diagnostics(literal, program, diagnostics);
+            collect_expression_struct_literal_field_diagnostics(
+                &literal.name,
+                program,
+                diagnostics,
+            );
+            for (_, value) in &literal.fields {
+                collect_expression_struct_literal_field_diagnostics(value, program, diagnostics);
+            }
+            for value in &literal.values {
+                collect_expression_struct_literal_field_diagnostics(value, program, diagnostics);
+            }
+        }
+        Expression::Index(expression) => {
+            collect_expression_struct_literal_field_diagnostics(
+                &expression.left,
+                program,
+                diagnostics,
+            );
+            collect_expression_struct_literal_field_diagnostics(
+                &expression.index,
+                program,
+                diagnostics,
+            );
+        }
+        Expression::Member(expression) => collect_expression_struct_literal_field_diagnostics(
+            &expression.left,
+            program,
+            diagnostics,
+        ),
+        Expression::Bool(_)
+        | Expression::Null(_)
+        | Expression::Float(_)
+        | Expression::Integer(_)
+        | Expression::String(_)
+        | Expression::Identifier(_) => {}
+    }
+}
+
+fn collect_struct_literal_field_diagnostics(
+    literal: &crate::ast::StructLiteral,
+    program: &Program,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if literal.fields.is_empty() {
+        return;
+    }
+    let Some(struct_name) = struct_type_name(&literal.name) else {
+        return;
+    };
+    let visible_fields = collect_visible_struct_fields(
+        program,
+        program.path.as_deref(),
+        Some(SourcePosition {
+            line: literal.span.start.0,
+            character: literal.span.start.1,
+        }),
+    );
+    let Some(fields) = visible_fields.get(struct_name.as_str()) else {
+        return;
+    };
+    for (field, _) in &literal.fields {
+        if !fields.iter().any(|known| known == &field.name) {
+            diagnostics.push(Diagnostic::unknown_struct_field(
+                struct_name.clone(),
+                field.name.to_string(),
+                field.span,
+            ));
+        }
+    }
 }
 
 fn current_file_references(program: &Program, target: &ReferenceTarget) -> Vec<Definition> {
@@ -1160,6 +1816,9 @@ fn collect_expression_references(
         Expression::Prefix(expression) => {
             collect_expression_references(&expression.right, target, references);
         }
+        Expression::Grouped(expression) => {
+            collect_expression_references(&expression.expression, target, references);
+        }
         Expression::Slice(slice) => {
             for element in &slice.elements {
                 collect_expression_references(element, target, references);
@@ -1247,6 +1906,7 @@ fn expression_member_path(expression: &Expression) -> Option<Vec<crate::ast::Ide
         Expression::Member(expression) => {
             member_path_from_parts(&expression.left, &expression.property)
         }
+        Expression::Grouped(expression) => expression_member_path(&expression.expression),
         _ => None,
     }
 }
@@ -1256,7 +1916,7 @@ fn same_location(left: &Definition, right: &Definition) -> bool {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-enum ValueShape {
+pub(crate) enum ValueShape {
     Result(Box<ValueShape>),
     Error,
     HttpResponse,
@@ -1265,6 +1925,7 @@ enum ValueShape {
     TerminalKey,
     TerminalSize,
     Struct(String),
+    Primitive(&'static str),
     Unknown,
 }
 
@@ -1395,6 +2056,7 @@ impl ValueShape {
                         .collect()
                 })
                 .unwrap_or_default(),
+            ValueShape::Primitive(_) => Vec::new(),
             ValueShape::Unknown => Vec::new(),
         }
     }
@@ -1409,6 +2071,7 @@ impl ValueShape {
             ValueShape::TerminalKey => "TerminalKey",
             ValueShape::TerminalSize => "TerminalSize",
             ValueShape::Struct(_) => "struct",
+            ValueShape::Primitive(name) => name,
             ValueShape::Unknown => "value",
         }
     }
@@ -1423,6 +2086,7 @@ impl ValueShape {
             ValueShape::TerminalKey => "{kind, key, ctrl, alt, shift}".to_string(),
             ValueShape::TerminalSize => "{cols, rows}".to_string(),
             ValueShape::Struct(name) => name.to_string(),
+            ValueShape::Primitive(name) => name.to_string(),
             ValueShape::Unknown => "value".to_string(),
         }
     }
@@ -1437,6 +2101,7 @@ fn field_symbol(name: &str, typ: &str, description: &str) -> Symbol {
 }
 
 struct ShapeContext {
+    current_path: Option<String>,
     functions: BTreeMap<String, FunctionLiteral>,
     function_returns: BTreeMap<String, Option<ValueShape>>,
     call_stack: Vec<String>,
@@ -1445,6 +2110,7 @@ struct ShapeContext {
 impl ShapeContext {
     fn new(program: &Program, position: Option<SourcePosition>) -> Self {
         Self {
+            current_path: program.path.clone(),
             functions: collect_named_functions(program, position),
             function_returns: BTreeMap::new(),
             call_stack: Vec::new(),
@@ -1589,13 +2255,16 @@ fn collect_return_shapes_from_statement(
             returns.push(expression_shape(&statement.value, variables, context)?);
             Some(true)
         }
-        Statement::Block(block) => collect_return_shapes_from_statements(
-            &block.statements,
-            variables,
-            context,
-            returns,
-            false,
-        ),
+        Statement::Block(block) => {
+            let mut nested_variables = variables.clone();
+            collect_return_shapes_from_statements(
+                &block.statements,
+                &mut nested_variables,
+                context,
+                returns,
+                false,
+            )
+        }
         Statement::While(statement) => {
             let mut nested_variables = variables.clone();
             collect_return_shapes_from_statements(
@@ -1724,12 +2393,26 @@ fn block_tail_shape(
 }
 
 fn unify_return_shapes(returns: Vec<ValueShape>) -> Option<ValueShape> {
-    let mut returns = returns.into_iter();
-    let first = returns.next()?;
-    if returns.all(|shape| shape == first) {
-        Some(first)
+    returns.into_iter().reduce(unify_value_shapes)
+}
+
+fn unify_value_shapes(left: ValueShape, right: ValueShape) -> ValueShape {
+    if left == right {
+        return left;
+    }
+    match (left, right) {
+        (ValueShape::Result(left), ValueShape::Result(right)) => {
+            ValueShape::Result(Box::new(unify_result_value_shapes(*left, *right)))
+        }
+        _ => ValueShape::Unknown,
+    }
+}
+
+fn unify_result_value_shapes(left: ValueShape, right: ValueShape) -> ValueShape {
+    if left == right {
+        left
     } else {
-        None
+        ValueShape::Unknown
     }
 }
 
@@ -1772,22 +2455,50 @@ fn collect_statement_variable_shapes(
             }
         }
         Statement::Block(block) => {
-            for statement in &block.statements {
-                collect_statement_variable_shapes(statement, variables, position, context);
+            if span_contains_position(block.span, position) {
+                let mut nested_variables = variables.clone();
+                for statement in &block.statements {
+                    collect_statement_variable_shapes(
+                        statement,
+                        &mut nested_variables,
+                        position,
+                        context,
+                    );
+                }
+                *variables = nested_variables;
             }
         }
         Statement::While(statement) => {
             if span_contains_position(statement.consequence.span, position) {
+                let mut nested_variables = variables.clone();
                 for statement in &statement.consequence.statements {
-                    collect_statement_variable_shapes(statement, variables, position, context);
+                    collect_statement_variable_shapes(
+                        statement,
+                        &mut nested_variables,
+                        position,
+                        context,
+                    );
                 }
+                *variables = nested_variables;
             }
         }
         Statement::ForIn(statement) => {
             if span_contains_position(statement.body.span, position) {
-                for statement in &statement.body.statements {
-                    collect_statement_variable_shapes(statement, variables, position, context);
+                let mut loop_variables = variables.clone();
+                loop_variables.insert(statement.key.name.to_string(), ValueShape::Unknown);
+                if let Some(value) = &statement.value {
+                    loop_variables.insert(value.name.to_string(), ValueShape::Unknown);
                 }
+                let mut body_variables = loop_variables.clone();
+                for statement in &statement.body.statements {
+                    collect_statement_variable_shapes(
+                        statement,
+                        &mut body_variables,
+                        position,
+                        context,
+                    );
+                }
+                *variables = body_variables;
             }
         }
         _ => {}
@@ -1819,6 +2530,9 @@ fn expression_shape(
     context: &mut ShapeContext,
 ) -> Option<ValueShape> {
     match expression {
+        Expression::Grouped(expression) => {
+            expression_shape(&expression.expression, variables, context)
+        }
         Expression::Call(call) => call_shape(&call.function, context),
         Expression::Identifier(identifier) => variables.get(&identifier.name).cloned(),
         Expression::Member(member) => {
@@ -1829,6 +2543,12 @@ fn expression_shape(
             struct_type_name(&literal.name).map(ValueShape::Struct)
         }
         Expression::Map(map) => map_literal_shape(map, variables, context),
+        Expression::Bool(_) => Some(ValueShape::Primitive("bool")),
+        Expression::Null(_) => Some(ValueShape::Primitive("null")),
+        Expression::Float(_) => Some(ValueShape::Primitive("float")),
+        Expression::Integer(_) => Some(ValueShape::Primitive("int")),
+        Expression::String(_) => Some(ValueShape::Primitive("string")),
+        Expression::Slice(_) => Some(ValueShape::Primitive("list")),
         _ => None,
     }
 }
@@ -1865,6 +2585,7 @@ fn map_literal_has_key(map: &crate::ast::MapLiteral, expected: &str) -> bool {
 fn map_literal_key_name(expression: &Expression) -> Option<String> {
     match expression {
         Expression::String(value) => Some(value.value.to_string()),
+        Expression::Grouped(expression) => map_literal_key_name(&expression.expression),
         _ => None,
     }
 }
@@ -1900,6 +2621,7 @@ fn expression_path(expression: &Expression) -> Option<Vec<String>> {
             path.push(member.property.name.to_string());
             Some(path)
         }
+        Expression::Grouped(expression) => expression_path(&expression.expression),
         _ => None,
     }
 }
@@ -1907,363 +2629,6 @@ fn expression_path(expression: &Expression) -> Option<Vec<String>> {
 fn known_call_shape(path: &[String]) -> Option<ValueShape> {
     let name = path.last()?.as_str();
     builtin_signature(name)?.return_shape
-}
-
-#[derive(Clone)]
-struct BuiltinSignature {
-    params: &'static str,
-    return_type: Option<&'static str>,
-    return_shape: Option<ValueShape>,
-}
-
-impl BuiltinSignature {
-    fn detail(&self, name: &str) -> String {
-        let signature = format!("fn {name}({})", self.params);
-        match self.return_type {
-            Some(return_type) => format!("{signature} -> {return_type}"),
-            None => signature,
-        }
-    }
-
-    fn builtin_detail(&self, name: &str) -> String {
-        format!("builtin {}", self.detail(name))
-    }
-}
-
-fn builtin_signature(name: &str) -> Option<BuiltinSignature> {
-    let result = |value| Some(ValueShape::Result(Box::new(value)));
-    Some(match name {
-        "print" => BuiltinSignature {
-            params: "values...",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "len" | "byte_len" => BuiltinSignature {
-            params: "value",
-            return_type: Some("int"),
-            return_shape: None,
-        },
-        "str" => BuiltinSignature {
-            params: "value",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "int" => BuiltinSignature {
-            params: "value",
-            return_type: Some("int"),
-            return_shape: None,
-        },
-        "float" => BuiltinSignature {
-            params: "value",
-            return_type: Some("float"),
-            return_shape: None,
-        },
-        "parse_int" => BuiltinSignature {
-            params: "value",
-            return_type: Some("Result<int>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "parse_float" => BuiltinSignature {
-            params: "value",
-            return_type: Some("Result<float>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "append" => BuiltinSignature {
-            params: "list, value",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "delete" => BuiltinSignature {
-            params: "list_or_map, key",
-            return_type: Some("value"),
-            return_shape: None,
-        },
-        "join" => BuiltinSignature {
-            params: "list, separator",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "read_file" => BuiltinSignature {
-            params: "path",
-            return_type: Some("Result<string>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "write_file" | "append_file" => BuiltinSignature {
-            params: "path, content",
-            return_type: Some("Result<int>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "file_exists" => BuiltinSignature {
-            params: "path",
-            return_type: Some("bool"),
-            return_shape: None,
-        },
-        "read_dir" => BuiltinSignature {
-            params: "path",
-            return_type: Some("Result<list>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "mkdir" | "remove_file" | "remove_dir" => BuiltinSignature {
-            params: "path",
-            return_type: Some("Result<null>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "copy_file" => BuiltinSignature {
-            params: "from, to",
-            return_type: Some("Result<int>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "rename" => BuiltinSignature {
-            params: "from, to",
-            return_type: Some("Result<null>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "metadata" => BuiltinSignature {
-            params: "path",
-            return_type: Some("Result<{exists, is_file, is_dir, size, modified_ms}>"),
-            return_shape: result(ValueShape::Metadata),
-        },
-        "path_join" => BuiltinSignature {
-            params: "parts...",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "path_dirname" | "path_basename" | "path_ext" => BuiltinSignature {
-            params: "path",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "path_exists" | "path_is_file" | "path_is_dir" => BuiltinSignature {
-            params: "path",
-            return_type: Some("bool"),
-            return_shape: None,
-        },
-        "env_get" => BuiltinSignature {
-            params: "name",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "env_set" => BuiltinSignature {
-            params: "name, value",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "cwd" => BuiltinSignature {
-            params: "",
-            return_type: Some("Result<string>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "set_cwd" => BuiltinSignature {
-            params: "path",
-            return_type: Some("Result<null>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "exit" => BuiltinSignature {
-            params: "code",
-            return_type: Some("never"),
-            return_shape: None,
-        },
-        "time_ms" | "now_ms" => BuiltinSignature {
-            params: "",
-            return_type: Some("int"),
-            return_shape: None,
-        },
-        "sleep_ms" => BuiltinSignature {
-            params: "ms",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "sleep" => BuiltinSignature {
-            params: "seconds",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "clear" | "home" | "hide_cursor" | "show_cursor" | "enable_raw_mode"
-        | "disable_raw_mode" | "clear_line" | "enter_alt_screen" | "leave_alt_screen" | "bold"
-        | "reset_style" => BuiltinSignature {
-            params: "",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "fg" | "bg" => BuiltinSignature {
-            params: "color",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "paint" => BuiltinSignature {
-            params: "color, text",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "paint_runs" => BuiltinSignature {
-            params: "runs",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "read_key" => BuiltinSignature {
-            params: "",
-            return_type: Some("Result<{kind, key, ctrl, alt, shift}>"),
-            return_shape: result(ValueShape::TerminalKey),
-        },
-        "read_key_timeout" => BuiltinSignature {
-            params: "ms",
-            return_type: Some("Result<{kind, key, ctrl, alt, shift}|null>"),
-            return_shape: result(ValueShape::TerminalKey),
-        },
-        "read_key_latest_timeout" => BuiltinSignature {
-            params: "ms",
-            return_type: Some("Result<{kind, key, ctrl, alt, shift}|null>"),
-            return_shape: result(ValueShape::TerminalKey),
-        },
-        "move" => BuiltinSignature {
-            params: "row, col",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "size" => BuiltinSignature {
-            params: "",
-            return_type: Some("Result<{cols, rows}>"),
-            return_shape: result(ValueShape::TerminalSize),
-        },
-        "abs" | "floor" | "ceil" | "round" | "sqrt" => BuiltinSignature {
-            params: "value",
-            return_type: Some("number"),
-            return_shape: None,
-        },
-        "pow" => BuiltinSignature {
-            params: "base, exponent",
-            return_type: Some("number"),
-            return_shape: None,
-        },
-        "min" | "max" => BuiltinSignature {
-            params: "values...",
-            return_type: Some("number"),
-            return_shape: None,
-        },
-        "random_int" => BuiltinSignature {
-            params: "min, max",
-            return_type: Some("int"),
-            return_shape: None,
-        },
-        "random_float" => BuiltinSignature {
-            params: "",
-            return_type: Some("float"),
-            return_shape: None,
-        },
-        "sort" => BuiltinSignature {
-            params: "list",
-            return_type: Some("list"),
-            return_shape: None,
-        },
-        "http_get" => BuiltinSignature {
-            params: "url, headers?",
-            return_type: Some("Result<{status, status_ok, headers, body}>"),
-            return_shape: result(ValueShape::HttpResponse),
-        },
-        "http_post" => BuiltinSignature {
-            params: "url, body, headers?",
-            return_type: Some("Result<{status, status_ok, headers, body}>"),
-            return_shape: result(ValueShape::HttpResponse),
-        },
-        "http_request" => BuiltinSignature {
-            params: "method, url, body, headers?",
-            return_type: Some("Result<{status, status_ok, headers, body}>"),
-            return_shape: result(ValueShape::HttpResponse),
-        },
-        "exec" => BuiltinSignature {
-            params: "command, args?",
-            return_type: Some("Result<{success, status, stdout, stderr}>"),
-            return_shape: result(ValueShape::ExecResult),
-        },
-        "url_encode" => BuiltinSignature {
-            params: "value",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "url_decode" => BuiltinSignature {
-            params: "value",
-            return_type: Some("Result<string>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "base64_encode" => BuiltinSignature {
-            params: "value",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "base64_decode" => BuiltinSignature {
-            params: "value",
-            return_type: Some("Result<string>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "sha256" => BuiltinSignature {
-            params: "value",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "json_stringify" => BuiltinSignature {
-            params: "value",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "args" => BuiltinSignature {
-            params: "",
-            return_type: Some("list"),
-            return_shape: None,
-        },
-        "read_line" => BuiltinSignature {
-            params: "",
-            return_type: Some("Result<string>"),
-            return_shape: result(ValueShape::Unknown),
-        },
-        "panic" => BuiltinSignature {
-            params: "message",
-            return_type: Some("never"),
-            return_shape: None,
-        },
-        "assert" => BuiltinSignature {
-            params: "condition, message?",
-            return_type: Some("null"),
-            return_shape: None,
-        },
-        "substr" => BuiltinSignature {
-            params: "text, start, length?",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "find" => BuiltinSignature {
-            params: "text, pattern",
-            return_type: Some("int"),
-            return_shape: None,
-        },
-        "replace" => BuiltinSignature {
-            params: "text, from, to",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "char_code" => BuiltinSignature {
-            params: "text",
-            return_type: Some("int"),
-            return_shape: None,
-        },
-        "from_char_code" => BuiltinSignature {
-            params: "code",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "type" => BuiltinSignature {
-            params: "value",
-            return_type: Some("string"),
-            return_shape: None,
-        },
-        "is_null" | "is_bool" | "is_int" | "is_float" | "is_string" | "is_list" | "is_map" => {
-            BuiltinSignature {
-                params: "value",
-                return_type: Some("bool"),
-                return_shape: None,
-            }
-        }
-        _ => return None,
-    })
 }
 
 fn collect_visible_struct_fields(
@@ -2284,6 +2649,27 @@ fn collect_visible_struct_fields(
         }
     }
     fields.extend(collect_struct_fields(program, position));
+    fields
+}
+
+fn collect_visible_struct_field_definitions(
+    program: &Program,
+    current_path: Option<&str>,
+    position: Option<SourcePosition>,
+) -> BTreeMap<String, BTreeMap<String, Definition>> {
+    let mut fields = BTreeMap::new();
+    for (alias, import_path) in imports(program, position) {
+        let imported = imported_struct_field_definitions(current_path, import_path.as_str());
+        match alias {
+            Some(alias) => {
+                for (name, struct_fields) in imported {
+                    fields.insert(format!("{alias}.{name}"), struct_fields);
+                }
+            }
+            None => fields.extend(imported),
+        }
+    }
+    fields.extend(collect_struct_field_definitions(program, position, None));
     fields
 }
 
@@ -2329,6 +2715,34 @@ fn imported_struct_fields(
         .collect()
 }
 
+fn imported_struct_field_definitions(
+    current_path: Option<&str>,
+    import_path: &str,
+) -> BTreeMap<String, BTreeMap<String, Definition>> {
+    let Some(path) = resolve_import_path(current_path, import_path) else {
+        return BTreeMap::new();
+    };
+    let Ok(source) = fs::read_to_string(path.as_path()) else {
+        return BTreeMap::new();
+    };
+    let module_path = path.to_string_lossy().into_owned();
+    let Ok(program) = parse_program(&source, Some(module_path.clone())) else {
+        return BTreeMap::new();
+    };
+    let exported = program
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Export(statement) => Some(statement.name.name.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    collect_struct_field_definitions(&program, None, Some(module_path))
+        .into_iter()
+        .filter(|(name, _)| exported.iter().any(|export| export == name))
+        .collect()
+}
+
 fn module_member_completions(
     program: &Program,
     path: Option<&str>,
@@ -2361,7 +2775,7 @@ fn module_exports(current_path: Option<&str>, import_path: &str) -> Vec<Symbol> 
         return Vec::new();
     };
     let declarations = collect_declaration_symbols(&program);
-    let builtins = new_builtin_function_map();
+    let builtins = builtin_names();
     program
         .statements
         .iter()
@@ -2374,7 +2788,8 @@ fn module_exports(current_path: Option<&str>, import_path: &str) -> Vec<Symbol> 
                 declaration.clone()
             } else {
                 let builtin_signature = builtins
-                    .contains_key(name)
+                    .iter()
+                    .any(|builtin| builtin == &name)
                     .then(|| builtin_signature(name))
                     .flatten();
                 let kind = if builtin_signature.is_some() {
@@ -2469,6 +2884,92 @@ fn collect_struct_fields(
     fields
 }
 
+fn collect_struct_field_definitions(
+    program: &Program,
+    position: Option<SourcePosition>,
+    path: Option<String>,
+) -> BTreeMap<String, BTreeMap<String, Definition>> {
+    let mut fields = BTreeMap::new();
+    for statement in &program.statements {
+        collect_statement_struct_field_definitions(statement, &mut fields, position, path.as_ref());
+    }
+    fields
+}
+
+fn collect_statement_struct_field_definitions(
+    statement: &Statement,
+    fields: &mut BTreeMap<String, BTreeMap<String, Definition>>,
+    position: Option<SourcePosition>,
+    path: Option<&String>,
+) {
+    if statement_starts_after(statement, position) {
+        return;
+    }
+    match statement {
+        Statement::Struct(statement) => {
+            fields.insert(
+                statement.name.name.to_string(),
+                statement
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name.to_string(),
+                            Definition {
+                                path: path.cloned(),
+                                span: field.span,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        Statement::Block(block) => {
+            if span_contains_position(block.span, position) {
+                let mut nested_fields = fields.clone();
+                for statement in &block.statements {
+                    collect_statement_struct_field_definitions(
+                        statement,
+                        &mut nested_fields,
+                        position,
+                        path,
+                    );
+                }
+                *fields = nested_fields;
+            }
+        }
+        Statement::While(statement) => {
+            if span_contains_position(statement.consequence.span, position) {
+                let mut nested_fields = fields.clone();
+                for statement in &statement.consequence.statements {
+                    collect_statement_struct_field_definitions(
+                        statement,
+                        &mut nested_fields,
+                        position,
+                        path,
+                    );
+                }
+                *fields = nested_fields;
+            }
+        }
+        Statement::ForIn(statement) => {
+            if span_contains_position(statement.body.span, position) {
+                let mut nested_fields = fields.clone();
+                for statement in &statement.body.statements {
+                    collect_statement_struct_field_definitions(
+                        statement,
+                        &mut nested_fields,
+                        position,
+                        path,
+                    );
+                }
+                *fields = nested_fields;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_statement_struct_fields(
     statement: &Statement,
     fields: &mut BTreeMap<String, Vec<String>>,
@@ -2489,22 +2990,30 @@ fn collect_statement_struct_fields(
             );
         }
         Statement::Block(block) => {
-            for statement in &block.statements {
-                collect_statement_struct_fields(statement, fields, position);
+            if span_contains_position(block.span, position) {
+                let mut nested_fields = fields.clone();
+                for statement in &block.statements {
+                    collect_statement_struct_fields(statement, &mut nested_fields, position);
+                }
+                *fields = nested_fields;
             }
         }
         Statement::While(statement) => {
             if span_contains_position(statement.consequence.span, position) {
+                let mut nested_fields = fields.clone();
                 for statement in &statement.consequence.statements {
-                    collect_statement_struct_fields(statement, fields, position);
+                    collect_statement_struct_fields(statement, &mut nested_fields, position);
                 }
+                *fields = nested_fields;
             }
         }
         Statement::ForIn(statement) => {
             if span_contains_position(statement.body.span, position) {
+                let mut nested_fields = fields.clone();
                 for statement in &statement.body.statements {
-                    collect_statement_struct_fields(statement, fields, position);
+                    collect_statement_struct_fields(statement, &mut nested_fields, position);
                 }
+                *fields = nested_fields;
             }
         }
         _ => {}
@@ -2544,22 +3053,42 @@ fn collect_statement_variable_struct_types(
             }
         }
         Statement::Block(block) => {
-            for statement in &block.statements {
-                collect_statement_variable_struct_types(statement, variables, position);
+            if span_contains_position(block.span, position) {
+                let mut nested_variables = variables.clone();
+                for statement in &block.statements {
+                    collect_statement_variable_struct_types(
+                        statement,
+                        &mut nested_variables,
+                        position,
+                    );
+                }
+                *variables = nested_variables;
             }
         }
         Statement::While(statement) => {
             if span_contains_position(statement.consequence.span, position) {
+                let mut nested_variables = variables.clone();
                 for statement in &statement.consequence.statements {
-                    collect_statement_variable_struct_types(statement, variables, position);
+                    collect_statement_variable_struct_types(
+                        statement,
+                        &mut nested_variables,
+                        position,
+                    );
                 }
+                *variables = nested_variables;
             }
         }
         Statement::ForIn(statement) => {
             if span_contains_position(statement.body.span, position) {
+                let mut nested_variables = variables.clone();
                 for statement in &statement.body.statements {
-                    collect_statement_variable_struct_types(statement, variables, position);
+                    collect_statement_variable_struct_types(
+                        statement,
+                        &mut nested_variables,
+                        position,
+                    );
                 }
+                *variables = nested_variables;
             }
         }
         _ => {}
@@ -2569,6 +3098,7 @@ fn collect_statement_variable_struct_types(
 fn struct_literal_type(expression: &Expression) -> Option<String> {
     match expression {
         Expression::StructLiteral(literal) => struct_type_name(&literal.name),
+        Expression::Grouped(expression) => struct_literal_type(&expression.expression),
         _ => None,
     }
 }
@@ -2581,23 +3111,57 @@ fn struct_type_name(expression: &Expression) -> Option<String> {
             struct_type_name(&member.left)?,
             member.property.name
         )),
+        Expression::Grouped(expression) => struct_type_name(&expression.expression),
         _ => None,
     }
 }
 
-fn diagnostic_json(err: &Error) -> String {
-    let (start_line, start_character, end_line, end_character) = match err.span {
-        Some(span) => lsp_range(span),
-        None => (0, 0, 0, 1),
-    };
-    format!(
-        "{{\"message\":\"{}\",\"severity\":1,\"source\":\"monkey\",\"range\":{{\"start\":{{\"line\":{},\"character\":{}}},\"end\":{{\"line\":{},\"character\":{}}}}}}}",
-        escape_json(&err.msg),
-        start_line,
-        start_character,
-        end_line,
-        end_character
-    )
+struct Diagnostic {
+    message: String,
+    span: Option<Span>,
+    severity: u8,
+}
+
+impl Diagnostic {
+    fn from_error(err: &Error) -> Self {
+        Self {
+            message: err.msg.to_string(),
+            span: err.span,
+            severity: 1,
+        }
+    }
+
+    fn undefined_identifier(name: String, span: Span) -> Self {
+        Self {
+            message: format!("Undefined identifier `{name}`"),
+            span: Some(span),
+            severity: 1,
+        }
+    }
+
+    fn unknown_struct_field(struct_name: String, field: String, span: Span) -> Self {
+        Self {
+            message: format!("Unknown field `{field}` for struct `{struct_name}`"),
+            span: Some(span),
+            severity: 1,
+        }
+    }
+
+    fn to_json(&self) -> String {
+        let (start_line, start_character, end_line, end_character) = match self.span {
+            Some(span) => lsp_range(span),
+            None => (0, 0, 0, 1),
+        };
+        format!(
+            "{{\"message\":\"{}\",\"severity\":{},\"source\":\"monkey\",\"range\":{{\"start\":{{\"line\":{},\"character\":{}}},\"end\":{{\"line\":{},\"character\":{}}}}}}}",
+            escape_json(&self.message),
+            self.severity,
+            start_line,
+            start_character,
+            end_line,
+            end_character
+        )
+    }
 }
 
 fn lsp_range(span: Span) -> (usize, usize, usize, usize) {
@@ -2646,13 +3210,13 @@ impl SymbolKind {
 }
 
 fn builtin_symbols() -> BTreeMap<String, Symbol> {
-    new_global_builtin_function_map()
-        .keys()
+    global_builtin_names()
+        .into_iter()
         .map(|name| {
             (
-                (*name).to_string(),
+                name.to_string(),
                 Symbol {
-                    label: (*name).to_string(),
+                    label: name.to_string(),
                     kind: SymbolKind::Builtin,
                     detail: builtin_signature(name)
                         .map(|signature| signature.builtin_detail(name))
@@ -2681,6 +3245,252 @@ fn collect_program_symbols(program: &Program, symbols: &mut BTreeMap<String, Sym
     let mut context = ShapeContext::new(program, None);
     for statement in program.statements.iter() {
         collect_statement_symbols(statement, symbols, &mut context);
+    }
+}
+
+fn collect_visible_program_symbols(
+    program: &Program,
+    symbols: &mut BTreeMap<String, Symbol>,
+    position: SourcePosition,
+) {
+    let mut context = ShapeContext::new(program, Some(position));
+    for statement in program.statements.iter() {
+        collect_visible_statement_symbols(statement, symbols, &mut context, position);
+    }
+}
+
+fn collect_visible_statement_symbols(
+    statement: &Statement,
+    symbols: &mut BTreeMap<String, Symbol>,
+    context: &mut ShapeContext,
+    position: SourcePosition,
+) {
+    if statement_starts_after(statement, Some(position)) {
+        return;
+    }
+    match statement {
+        Statement::Let(statement) => {
+            let is_function = matches!(statement.value, Expression::Function(_));
+            if is_function && span_ends_before_or_at(statement.name.span, position) {
+                let (kind, detail) = match &statement.value {
+                    Expression::Function(function) => (
+                        SymbolKind::Function,
+                        format!(
+                            "let {} = {}",
+                            statement.name.name,
+                            function_signature(function, Some(context))
+                        ),
+                    ),
+                    _ => (SymbolKind::Variable, format!("let {}", statement.name.name)),
+                };
+                insert_symbol(symbols, &statement.name.name, kind, detail);
+            }
+            collect_visible_expression_symbols(&statement.value, symbols, context, position);
+            if !is_function
+                && span_ends_before_or_at(statement.name.span, position)
+                && !span_contains_position(statement.value.span(), Some(position))
+            {
+                insert_symbol(
+                    symbols,
+                    &statement.name.name,
+                    SymbolKind::Variable,
+                    format!("let {}", statement.name.name),
+                );
+            }
+        }
+        Statement::Struct(statement) => {
+            if span_ends_before_or_at(statement.name.span, position) {
+                let fields = statement
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                insert_symbol(
+                    symbols,
+                    &statement.name.name,
+                    SymbolKind::Struct,
+                    format!("struct {} {{ {} }}", statement.name.name, fields),
+                );
+            }
+        }
+        Statement::Import(statement) => {
+            if let Some(alias) = &statement.alias {
+                if span_ends_before_or_at(alias.span, position) {
+                    insert_symbol(
+                        symbols,
+                        &alias.name,
+                        SymbolKind::Module,
+                        format!("module from {}", statement.path.value),
+                    );
+                }
+            } else {
+                for symbol in module_exports(
+                    context.current_path.as_deref(),
+                    statement.path.value.as_str(),
+                ) {
+                    insert_symbol(symbols, &symbol.label.clone(), symbol.kind, symbol.detail);
+                }
+            }
+        }
+        Statement::Expression(statement) => {
+            collect_visible_expression_symbols(&statement.expression, symbols, context, position);
+        }
+        Statement::Block(block) => {
+            if span_contains_position(block.span, Some(position)) {
+                for statement in block.statements.iter() {
+                    collect_visible_statement_symbols(statement, symbols, context, position);
+                }
+            }
+        }
+        Statement::While(statement) => {
+            collect_visible_expression_symbols(&statement.condition, symbols, context, position);
+            if span_contains_position(statement.consequence.span, Some(position)) {
+                for statement in statement.consequence.statements.iter() {
+                    collect_visible_statement_symbols(statement, symbols, context, position);
+                }
+            }
+        }
+        Statement::ForIn(statement) => {
+            collect_visible_expression_symbols(&statement.collection, symbols, context, position);
+            if span_contains_position(statement.body.span, Some(position)) {
+                insert_symbol(
+                    symbols,
+                    &statement.key.name,
+                    SymbolKind::Variable,
+                    format!("for variable {}", statement.key.name),
+                );
+                if let Some(value) = &statement.value {
+                    insert_symbol(
+                        symbols,
+                        &value.name,
+                        SymbolKind::Variable,
+                        format!("for variable {}", value.name),
+                    );
+                }
+                for statement in statement.body.statements.iter() {
+                    collect_visible_statement_symbols(statement, symbols, context, position);
+                }
+            }
+        }
+        Statement::Assign(statement) => {
+            collect_visible_expression_symbols(&statement.value, symbols, context, position);
+        }
+        Statement::Return(statement) => {
+            collect_visible_expression_symbols(&statement.value, symbols, context, position);
+        }
+        Statement::Empty(_)
+        | Statement::Export(_)
+        | Statement::Break(_)
+        | Statement::Continue(_) => {}
+    }
+}
+
+fn collect_visible_expression_symbols(
+    expression: &Expression,
+    symbols: &mut BTreeMap<String, Symbol>,
+    context: &mut ShapeContext,
+    position: SourcePosition,
+) {
+    if !span_contains_position(expression.span(), Some(position))
+        && expression.span().end.0 < position.line
+        && !matches!(expression, Expression::Function(_))
+    {
+        return;
+    }
+    match expression {
+        Expression::Function(function) => {
+            if let Some(name) = &function.name {
+                if span_ends_before_or_at(name.span, position) {
+                    insert_symbol(
+                        symbols,
+                        &name.name,
+                        SymbolKind::Function,
+                        function_signature(function, Some(context)),
+                    );
+                }
+            }
+            if span_contains_position(function.body.span, Some(position)) {
+                for parameter in function.parameters.iter() {
+                    insert_symbol(
+                        symbols,
+                        &parameter.name,
+                        SymbolKind::Variable,
+                        format!("parameter {}", parameter.name),
+                    );
+                }
+                for statement in function.body.statements.iter() {
+                    collect_visible_statement_symbols(statement, symbols, context, position);
+                }
+            }
+        }
+        Expression::Call(call) => {
+            collect_visible_expression_symbols(&call.function, symbols, context, position);
+            for argument in call.arguments.iter() {
+                collect_visible_expression_symbols(argument, symbols, context, position);
+            }
+        }
+        Expression::If(expression) => {
+            collect_visible_expression_symbols(&expression.condition, symbols, context, position);
+            if span_contains_position(expression.consequence.span, Some(position)) {
+                for statement in expression.consequence.statements.iter() {
+                    collect_visible_statement_symbols(statement, symbols, context, position);
+                }
+            }
+            if let Some(alternative) = &expression.alternative {
+                if span_contains_position(alternative.span, Some(position)) {
+                    for statement in alternative.statements.iter() {
+                        collect_visible_statement_symbols(statement, symbols, context, position);
+                    }
+                }
+            }
+            if let Some(optional) = &expression.optional {
+                collect_visible_expression_symbols(optional, symbols, context, position);
+            }
+        }
+        Expression::Infix(expression) => {
+            collect_visible_expression_symbols(&expression.left, symbols, context, position);
+            collect_visible_expression_symbols(&expression.right, symbols, context, position);
+        }
+        Expression::Prefix(expression) => {
+            collect_visible_expression_symbols(&expression.right, symbols, context, position);
+        }
+        Expression::Grouped(expression) => {
+            collect_visible_expression_symbols(&expression.expression, symbols, context, position);
+        }
+        Expression::Slice(slice) => {
+            for element in slice.elements.iter() {
+                collect_visible_expression_symbols(element, symbols, context, position);
+            }
+        }
+        Expression::Map(map) => {
+            for (key, value) in map.kv_pair.iter() {
+                collect_visible_expression_symbols(key, symbols, context, position);
+                collect_visible_expression_symbols(value, symbols, context, position);
+            }
+        }
+        Expression::StructLiteral(literal) => {
+            collect_visible_expression_symbols(&literal.name, symbols, context, position);
+            for (_, value) in literal.fields.iter() {
+                collect_visible_expression_symbols(value, symbols, context, position);
+            }
+            for value in literal.values.iter() {
+                collect_visible_expression_symbols(value, symbols, context, position);
+            }
+        }
+        Expression::Index(index) => {
+            collect_visible_expression_symbols(&index.left, symbols, context, position);
+            collect_visible_expression_symbols(&index.index, symbols, context, position);
+        }
+        Expression::Member(member) => {
+            collect_visible_expression_symbols(&member.left, symbols, context, position);
+        }
+        Expression::Identifier(_)
+        | Expression::Bool(_)
+        | Expression::Null(_)
+        | Expression::Float(_)
+        | Expression::Integer(_)
+        | Expression::String(_) => {}
     }
 }
 
@@ -2726,6 +3536,13 @@ fn collect_statement_symbols(
                     SymbolKind::Module,
                     format!("module from {}", statement.path.value),
                 );
+            } else {
+                for symbol in module_exports(
+                    context.current_path.as_deref(),
+                    statement.path.value.as_str(),
+                ) {
+                    insert_symbol(symbols, &symbol.label.clone(), symbol.kind, symbol.detail);
+                }
             }
         }
         Statement::Expression(statement) => {
@@ -2828,6 +3645,9 @@ fn collect_expression_symbols(
         }
         Expression::Prefix(expression) => {
             collect_expression_symbols(&expression.right, symbols, context)
+        }
+        Expression::Grouped(expression) => {
+            collect_expression_symbols(&expression.expression, symbols, context)
         }
         Expression::Slice(slice) => {
             for element in slice.elements.iter() {
@@ -3026,6 +3846,88 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_reports_undefined_identifiers() {
+        let json = diagnostics_json("let x = missing + 1;", Some("test.monkey".to_string()));
+        assert!(json.contains("\"diagnostics\":[{"), "{json}");
+        assert!(json.contains("Undefined identifier `missing`"), "{json}");
+        assert!(json.contains("\"line\":0,\"character\":8"), "{json}");
+    }
+
+    #[test]
+    fn diagnostics_accepts_visible_identifiers_and_record_keys() {
+        let module_path = temp_file_path("monkey_diagnostics_import.monkey");
+        let module_literal = monkey_string_literal(module_path.as_str());
+        fs::write(
+            module_path.as_str(),
+            r#"
+            let exported = 1;
+            export exported;
+            "#,
+        )
+        .unwrap();
+        let source = format!(
+            r#"
+            import util from {module_literal};
+            import {module_literal};
+            let local = 1;
+            let result = {{ok: true, value: local + exported, error: null}};
+            print(result.value);
+            util.exported;
+            "#
+        );
+        let json = diagnostics_json(&source, Some("test.monkey".to_string()));
+        assert_eq!(json, "{\"diagnostics\":[]}");
+        let _ = fs::remove_file(module_path);
+    }
+
+    #[test]
+    fn diagnostics_reports_unknown_struct_literal_fields() {
+        let source = r#"struct User {
+    name;
+    age;
+    likes;
+}
+let b = User{namek: "", age: "likes", likes: []};
+"#;
+        let json = diagnostics_json(source, Some("test.monkey".to_string()));
+        assert!(json.contains("\"diagnostics\":[{"), "{json}");
+        assert!(
+            json.contains("Unknown field `namek` for struct `User`"),
+            "{json}"
+        );
+        assert!(json.contains("\"line\":5,\"character\":13"), "{json}");
+        assert!(!json.contains("Unknown field `age`"), "{json}");
+        assert!(!json.contains("Unknown field `likes`"), "{json}");
+    }
+
+    #[test]
+    fn diagnostics_reports_unknown_namespace_struct_literal_fields() {
+        let module_path = temp_file_path("monkey_diagnostics_namespace_struct.monkey");
+        let module_literal = monkey_string_literal(module_path.as_str());
+        fs::write(
+            module_path.as_str(),
+            r#"
+            struct User { name; age; }
+            export User;
+            "#,
+        )
+        .unwrap();
+        let source = format!(
+            r#"
+            import model from {module_literal};
+            let b = model.User{{namek: "", age: 18}};
+            "#
+        );
+        let json = diagnostics_json(&source, Some("test.monkey".to_string()));
+        assert!(
+            json.contains("Unknown field `namek` for struct `model.User`"),
+            "{json}"
+        );
+        assert!(!json.contains("Unknown field `age`"), "{json}");
+        let _ = fs::remove_file(module_path);
+    }
+
+    #[test]
     fn editor_formatting_uses_pretty_formatter() {
         let formatted = format_source_for_editor("fn f(){let x=1;x}", None).unwrap();
         assert_eq!(formatted, "fn f() {\n    let x = 1;\n    x\n}");
@@ -3088,6 +3990,19 @@ mod tests {
     }
 
     #[test]
+    fn completion_returns_struct_fields_from_parenthesized_receiver() {
+        let marked = r#"
+            struct User { name; age; }
+            let user = User{name: "tom", age: 18};
+            (user).|
+            "#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(json.contains("\"label\":\"name\""), "{json}");
+        assert!(json.contains("\"label\":\"age\""), "{json}");
+    }
+
+    #[test]
     fn completion_returns_struct_fields_for_multiline_struct_with_slice_field() {
         let marked = r#"struct User {
     name;
@@ -3099,6 +4014,39 @@ user.|"#;
         let (source, line, character) = source_with_cursor(marked);
         let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
         assert!(json.contains("\"label\":\"name\""), "{json}");
+        assert!(json.contains("\"label\":\"age\""), "{json}");
+        assert!(json.contains("\"label\":\"likes\""), "{json}");
+    }
+
+    #[test]
+    fn completion_returns_struct_literal_fields() {
+        let marked = r#"struct User {
+    name;
+    age;
+    likes;
+}
+let user = User{|
+"#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(json.contains("\"label\":\"name\""), "{json}");
+        assert!(json.contains("\"label\":\"age\""), "{json}");
+        assert!(json.contains("\"label\":\"likes\""), "{json}");
+        assert!(json.contains("field User.name"), "{json}");
+    }
+
+    #[test]
+    fn completion_filters_struct_literal_fields_already_written() {
+        let marked = r#"struct User {
+    name;
+    age;
+    likes;
+}
+let user = User{name: "tom", |
+"#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(!json.contains("\"label\":\"name\""), "{json}");
         assert!(json.contains("\"label\":\"age\""), "{json}");
         assert!(json.contains("\"label\":\"likes\""), "{json}");
     }
@@ -3584,6 +4532,21 @@ let broken = ;
     }
 
     #[test]
+    fn completion_propagates_result_shape_through_grouped_expression() {
+        let marked = r#"
+            import http from "stdlib/http.monkey";
+            let result = (http.http_get("https://example.com"));
+            result.value.|
+            "#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(json.contains("\"label\":\"status\""), "{json}");
+        assert!(json.contains("\"label\":\"status_ok\""), "{json}");
+        assert!(json.contains("\"label\":\"headers\""), "{json}");
+        assert!(json.contains("\"label\":\"body\""), "{json}");
+    }
+
+    #[test]
     fn completion_returns_metadata_value_fields() {
         let marked = r#"
             import fs from "stdlib/fs.monkey";
@@ -3664,6 +4627,33 @@ let broken = ;
     }
 
     #[test]
+    fn completion_returns_namespace_imported_struct_literal_fields() {
+        let module_path = temp_file_path("monkey_completion_namespace_struct_literal.monkey");
+        let module_literal = monkey_string_literal(module_path.as_str());
+        fs::write(
+            module_path.as_str(),
+            r#"
+            struct User { name; age; likes; }
+            export User;
+            "#,
+        )
+        .unwrap();
+        let marked = format!(
+            r#"
+            import model from {module_literal};
+            let user = model.User{{name: "tom", |}}
+            "#
+        );
+        let (source, line, character) = source_with_cursor(marked.as_str());
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(!json.contains("\"label\":\"name\""), "{json}");
+        assert!(json.contains("\"label\":\"age\""), "{json}");
+        assert!(json.contains("\"label\":\"likes\""), "{json}");
+        assert!(json.contains("field model.User.age"), "{json}");
+        let _ = fs::remove_file(module_path);
+    }
+
+    #[test]
     fn completion_returns_module_exports_from_rust_lang_service() {
         let module_path = temp_file_path("monkey_completion_module.monkey");
         let module_literal = monkey_string_literal(module_path.as_str());
@@ -3687,6 +4677,58 @@ let broken = ;
         assert!(json.contains("\"label\":\"make_user\""), "{json}");
         assert!(json.contains("\"label\":\"User\""), "{json}");
         assert!(json.contains("fn make_user"), "{json}");
+        let _ = fs::remove_file(module_path);
+    }
+
+    #[test]
+    fn completion_returns_bare_imported_exports_as_visible_symbols() {
+        let module_path = temp_file_path("monkey_completion_bare_exports.monkey");
+        let module_literal = monkey_string_literal(module_path.as_str());
+        fs::write(
+            module_path.as_str(),
+            r#"
+            fn make_user() { 1 }
+            struct User { name; }
+            export make_user;
+            export User;
+            "#,
+        )
+        .unwrap();
+        let marked = format!(
+            r#"
+            import {module_literal};
+            make_|
+            "#
+        );
+        let (source, line, character) = source_with_cursor(marked.as_str());
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(json.contains("\"label\":\"make_user\""), "{json}");
+        assert!(json.contains("fn make_user"), "{json}");
+        assert!(json.contains("\"label\":\"User\""), "{json}");
+        let _ = fs::remove_file(module_path);
+    }
+
+    #[test]
+    fn completion_ignores_bare_imported_exports_after_cursor() {
+        let module_path = temp_file_path("monkey_completion_future_bare_export.monkey");
+        let module_literal = monkey_string_literal(module_path.as_str());
+        fs::write(
+            module_path.as_str(),
+            r#"
+            fn make_user() { 1 }
+            export make_user;
+            "#,
+        )
+        .unwrap();
+        let marked = format!(
+            r#"
+            make_|
+            import {module_literal};
+            "#
+        );
+        let (source, line, character) = source_with_cursor(marked.as_str());
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(!json.contains("\"label\":\"make_user\""), "{json}");
         let _ = fs::remove_file(module_path);
     }
 
@@ -3727,8 +4769,8 @@ let broken = ;
 
         assert!(json.contains("\"label\":\"read\""), "{json}");
         assert!(
-            json.contains("fn read() -&gt; Result&lt;value&gt;")
-                || json.contains("fn read() -> Result<value>"),
+            json.contains("fn read() -&gt; Result&lt;int&gt;")
+                || json.contains("fn read() -> Result<int>"),
             "{json}"
         );
     }
@@ -3849,6 +4891,31 @@ let broken = ;
     }
 
     #[test]
+    fn completion_reports_precise_builtin_signature_shapes() {
+        let marked = r#"
+        import env from "stdlib/env.monkey";
+        env.|
+        "#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(json.contains("\"label\":\"env_get\""), "{json}");
+        assert!(json.contains("fn env_get(name)"), "{json}");
+        assert!(json.contains("string|null"), "{json}");
+
+        let marked = r#"
+        let parsed = parse_int("42");
+        parsed.|
+        "#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(json.contains("\"label\":\"value\""), "{json}");
+        assert!(
+            json.contains("field value: int - successful value"),
+            "{json}"
+        );
+    }
+
+    #[test]
     fn completion_returns_import_paths_from_rust_lang_service() {
         let dir = temp_dir_path("monkey_completion_import_paths");
         fs::create_dir_all(dir.as_str()).unwrap();
@@ -3884,6 +4951,28 @@ let broken = ;
     }
 
     #[test]
+    fn completion_scopes_for_loop_variables_to_body() {
+        let marked_inside = r#"for i, value in [1] {
+    va|
+}
+"#;
+        let (source, line, character) = source_with_cursor(marked_inside);
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(json.contains("\"label\":\"value\""), "{json}");
+        assert!(json.contains("\"label\":\"i\""), "{json}");
+
+        let marked_outside = r#"for i, value in [1] {
+    value;
+}
+va|
+"#;
+        let (source, line, character) = source_with_cursor(marked_outside);
+        let json = completion_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(!json.contains("\"label\":\"value\""), "{json}");
+        assert!(!json.contains("\"label\":\"i\""), "{json}");
+    }
+
+    #[test]
     fn definition_returns_local_function_location() {
         let marked = r#"fn add(x) {
     x
@@ -3910,6 +4999,73 @@ us|er.name;
         assert!(json.contains("\"definition\":{"), "{json}");
         assert!(json.contains("\"path\":null"), "{json}");
         assert!(json.contains("\"line\":1,\"character\":4"), "{json}");
+    }
+
+    #[test]
+    fn definition_returns_struct_field_location_for_member_reference() {
+        let marked = r#"struct User { name; age; }
+let user = User{name: "tom", age: 1};
+user.na|me;
+"#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = definition_json(&source, Some("test.monkey".to_string()), line, character);
+
+        assert!(json.contains("\"definition\":{"), "{json}");
+        assert!(json.contains("\"path\":null"), "{json}");
+        assert!(json.contains("\"line\":0,\"character\":14"), "{json}");
+    }
+
+    #[test]
+    fn definition_returns_struct_field_location_through_identifier_alias() {
+        let marked = r#"struct User { name; age; }
+let user = User{name: "tom", age: 1};
+let other = user;
+other.na|me;
+"#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = definition_json(&source, Some("test.monkey".to_string()), line, character);
+
+        assert!(json.contains("\"definition\":{"), "{json}");
+        assert!(json.contains("\"path\":null"), "{json}");
+        assert!(json.contains("\"line\":0,\"character\":14"), "{json}");
+    }
+
+    #[test]
+    fn definition_returns_struct_field_location_through_parenthesized_receiver() {
+        let marked = r#"struct User { name; age; }
+let user = User{name: "tom", age: 1};
+(user).na|me;
+"#;
+        let (source, line, character) = source_with_cursor(marked);
+        let json = definition_json(&source, Some("test.monkey".to_string()), line, character);
+
+        assert!(json.contains("\"definition\":{"), "{json}");
+        assert!(json.contains("\"path\":null"), "{json}");
+        assert!(json.contains("\"line\":0,\"character\":14"), "{json}");
+    }
+
+    #[test]
+    fn definition_returns_namespace_imported_struct_field_location() {
+        let module_path = temp_file_path("monkey_definition_namespace_struct_field.monkey");
+        let module_literal = monkey_string_literal(module_path.as_str());
+        let module_json = json_string_content(module_path.as_str());
+        fs::write(
+            module_path.as_str(),
+            "struct User { name; age; }\nexport User;\n",
+        )
+        .unwrap();
+        let marked = format!(
+            "import models from {module_literal};\nlet user = models.User{{name: \"tom\", age: 1}};\nuser.na|me;\n"
+        );
+        let (source, line, character) = source_with_cursor(marked.as_str());
+        let json = definition_json(&source, Some("test.monkey".to_string()), line, character);
+
+        assert!(
+            json.contains(&format!("\"path\":\"{module_json}\"")),
+            "{json}"
+        );
+        assert!(json.contains("\"line\":0,\"character\":14"), "{json}");
+        let _ = fs::remove_file(module_path);
     }
 
     #[test]
@@ -4103,6 +5259,27 @@ value;
         assert!(json.contains("\"line\":2,\"character\":8"), "{json}");
         assert!(json.contains("\"line\":3,\"character\":4"), "{json}");
         assert!(!json.contains("\"line\":5,\"character\":0"), "{json}");
+    }
+
+    #[test]
+    fn definitions_scope_for_loop_variables_to_body() {
+        let marked_inside = r#"for i, value in [1] {
+    va|lue;
+}
+"#;
+        let (source, line, character) = source_with_cursor(marked_inside);
+        let json = definition_json(&source, Some("test.monkey".to_string()), line, character);
+        assert!(json.contains("\"definition\":{"), "{json}");
+        assert!(json.contains("\"line\":0,\"character\":7"), "{json}");
+
+        let marked_outside = r#"for i, value in [1] {
+    value;
+}
+va|lue;
+"#;
+        let (source, line, character) = source_with_cursor(marked_outside);
+        let json = definition_json(&source, Some("test.monkey".to_string()), line, character);
+        assert_eq!(json, "{\"definition\":null}");
     }
 
     #[test]

@@ -125,11 +125,9 @@ async function provideFormatting(document) {
 }
 
 async function provideCompletions(document, position) {
-  if (isRustCompletionContext(document, position)) {
-    const rustCompletions = await provideRustCompletions(document, position);
-    if (rustCompletions) {
-      return rustCompletions;
-    }
+  const rustCompletions = await provideRustCompletions(document, position);
+  if (rustCompletions) {
+    return rustCompletions;
   }
 
   let symbols = symbolCache.get(document.uri.toString());
@@ -142,11 +140,6 @@ async function provideCompletions(document, position) {
     item.detail = symbol.detail;
     return item;
   });
-}
-
-function isMemberCompletionContext(document, position) {
-  const line = document.lineAt(position.line).text.slice(0, position.character);
-  return /[A-Za-z_][A-Za-z0-9_]*\.$/.test(line);
 }
 
 async function provideRustCompletions(document, position) {
@@ -166,16 +159,6 @@ async function provideRustCompletions(document, position) {
     outputLine(`completion failed: ${error.message}`);
     return undefined;
   }
-}
-
-function isRustCompletionContext(document, position) {
-  return isMemberCompletionContext(document, position) || isImportCompletionContext(document, position);
-}
-
-function isImportCompletionContext(document, position) {
-  const line = document.lineAt(position.line).text.slice(0, position.character);
-  const match = line.match(/\bimport(?:\s+[A-Za-z_][A-Za-z0-9_]*\s+from)?\s+"([^"]*)$/);
-  return Boolean(match);
 }
 
 async function provideHoverInfo(document, position) {

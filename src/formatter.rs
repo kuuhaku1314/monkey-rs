@@ -11,17 +11,14 @@ const DEFAULT_LINE_WIDTH: usize = 88;
 pub fn format_source(source: &str, path: Option<String>) -> Result<String, Error> {
     let mut parser = new_parser(new_lexer(source.to_string(), path));
     let program = parser.parse_program()?;
-    Ok(format_program(&program))
-}
-
-pub fn format_program(program: &Program) -> String {
-    PrettyFormatter::default().format_program(program)
+    Ok(PrettyFormatter::with_source(source).format_program(&program))
 }
 
 struct PrettyFormatter {
     output: String,
     indent: usize,
     line_width: usize,
+    preserve_blank_lines: bool,
 }
 
 impl Default for PrettyFormatter {
@@ -30,17 +27,26 @@ impl Default for PrettyFormatter {
             output: String::new(),
             indent: 0,
             line_width: DEFAULT_LINE_WIDTH,
+            preserve_blank_lines: false,
         }
     }
 }
 
 impl PrettyFormatter {
+    fn with_source(_source: &str) -> Self {
+        Self {
+            preserve_blank_lines: true,
+            ..Self::default()
+        }
+    }
+
     fn format_program(mut self, program: &Program) -> String {
         for (index, statement) in program.statements.iter().enumerate() {
-            if index != 0 {
-                self.newline();
+            if index == 0 {
+                self.write_indent();
+            } else {
+                self.write_statement_separator(&program.statements[index - 1], statement);
             }
-            self.write_indent();
             self.write_statement(statement);
         }
         self.output
@@ -139,9 +145,13 @@ impl PrettyFormatter {
         }
         self.write("{");
         self.indent += 1;
-        for statement in block.statements.iter() {
-            self.newline();
-            self.write_indent();
+        for (index, statement) in block.statements.iter().enumerate() {
+            if index == 0 {
+                self.newline();
+                self.write_indent();
+            } else {
+                self.write_statement_separator(&block.statements[index - 1], statement);
+            }
             self.write_statement(statement);
         }
         self.indent -= 1;
@@ -187,6 +197,11 @@ impl PrettyFormatter {
             Expression::Prefix(value) => {
                 self.write(&value.token.literal());
                 self.write_expression(&value.right, Precedence::Prefix);
+            }
+            Expression::Grouped(value) => {
+                self.write("(");
+                self.write_expression(&value.expression, Precedence::Lowest);
+                self.write(")");
             }
             Expression::Slice(value) => {
                 let elements = value
@@ -346,6 +361,7 @@ impl PrettyFormatter {
             output: String::new(),
             indent: self.indent,
             line_width: self.line_width,
+            preserve_blank_lines: false,
         };
         formatter.write_expression(expression, parent_precedence);
         formatter.output
@@ -354,6 +370,12 @@ impl PrettyFormatter {
     fn map_key_to_string(&self, expression: &Expression) -> String {
         match expression {
             Expression::String(value) if is_identifier_like(&value.value) => value.value.to_owned(),
+            Expression::Grouped(value) => {
+                format!(
+                    "({})",
+                    self.expression_to_string(&value.expression, Precedence::Lowest)
+                )
+            }
             _ => self.expression_to_string(expression, Precedence::Lowest),
         }
     }
@@ -368,6 +390,21 @@ impl PrettyFormatter {
 
     fn newline(&mut self) {
         self.output.push('\n');
+    }
+
+    fn write_statement_separator(&mut self, previous: &Statement, current: &Statement) {
+        let mut newline_count = 1;
+        if self.preserve_blank_lines {
+            let previous_end_line = previous.span().end.0;
+            let current_start_line = current.span().start.0;
+            if current_start_line > previous_end_line + 1 {
+                newline_count += current_start_line - previous_end_line - 1;
+            }
+        }
+        for _ in 0..newline_count {
+            self.newline();
+        }
+        self.write_indent();
     }
 
     fn write_indent(&mut self) {
@@ -389,6 +426,7 @@ fn expression_precedence(expression: &Expression) -> Precedence {
     match expression {
         Expression::Infix(value) => value.token.precedence(),
         Expression::Prefix(_) => Precedence::Prefix,
+        Expression::Grouped(_) => Precedence::Index,
         Expression::If(_) => Precedence::Lowest,
         _ => Precedence::Index,
     }
@@ -467,6 +505,17 @@ export user;"#
             formatted,
             r#"let ok = a == b && c || d;
 let nested = a && (b || c);"#
+        );
+    }
+
+    #[test]
+    fn preserves_blank_lines_and_grouping_parentheses() {
+        let formatted = format_source("let a=(1+2)*3;\n\nlet b=a+(2*3);", None).unwrap();
+        assert_eq!(
+            formatted,
+            r#"let a = (1 + 2) * 3;
+
+let b = a + (2 * 3);"#
         );
     }
 

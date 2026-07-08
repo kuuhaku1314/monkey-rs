@@ -221,39 +221,64 @@ impl Parser {
             end_of_semicolon,
         } = stmt;
         match expression {
-            Expression::Infix(infix) if infix.token.is_assign() => match infix.left {
-                Expression::Identifier(identifier) => Statement::Assign(AssignStatement {
-                    span,
-                    target: AssignTarget::Identifier(identifier),
-                    value: infix.right,
-                }),
-                Expression::Index(index) => Statement::Assign(AssignStatement {
-                    span,
-                    target: AssignTarget::Index {
-                        left: index.left,
-                        index: index.index,
-                    },
-                    value: infix.right,
-                }),
-                Expression::Member(member) => Statement::Assign(AssignStatement {
-                    span,
-                    target: AssignTarget::Member {
-                        left: member.left,
-                        property: member.property,
-                    },
-                    value: infix.right,
-                }),
-                left => Statement::Expression(ExpressionStatement {
-                    span,
-                    expression: Expression::Infix(Box::new(InfixExpression { left, ..*infix })),
-                    end_of_semicolon,
-                }),
-            },
+            Expression::Infix(infix) if infix.token.is_assign() => {
+                let InfixExpression {
+                    span: infix_span,
+                    token,
+                    left,
+                    right,
+                } = *infix;
+                match Self::expression_to_assign_target_or_expression(left) {
+                    Ok(target) => Statement::Assign(AssignStatement {
+                        span,
+                        target,
+                        value: right,
+                    }),
+                    Err(left) => Statement::Expression(ExpressionStatement {
+                        span,
+                        expression: Expression::Infix(Box::new(InfixExpression {
+                            span: infix_span,
+                            token,
+                            left: *left,
+                            right,
+                        })),
+                        end_of_semicolon,
+                    }),
+                }
+            }
             expression => Statement::Expression(ExpressionStatement {
                 span,
                 expression,
                 end_of_semicolon,
             }),
+        }
+    }
+
+    fn expression_to_assign_target_or_expression(
+        expression: Expression,
+    ) -> Result<AssignTarget, Box<Expression>> {
+        match expression {
+            Expression::Identifier(identifier) => Ok(AssignTarget::Identifier(identifier)),
+            Expression::Index(index) => Ok(AssignTarget::Index {
+                left: index.left,
+                index: index.index,
+            }),
+            Expression::Member(member) => Ok(AssignTarget::Member {
+                left: member.left,
+                property: member.property,
+            }),
+            Expression::Grouped(grouped) => {
+                let crate::ast::GroupedExpression { span, expression } = *grouped;
+                Self::expression_to_assign_target_or_expression(expression).map_err(|expression| {
+                    Box::new(Expression::Grouped(Box::new(
+                        crate::ast::GroupedExpression {
+                            span,
+                            expression: *expression,
+                        },
+                    )))
+                })
+            }
+            expression => Err(Box::new(expression)),
         }
     }
 
@@ -744,12 +769,18 @@ impl Parser {
 
     fn parse_grouped_expression(p: &mut Parser) -> Result<Expression, Error> {
         debug_assert!(p.cur_token.is_lparen());
+        let start = p.cur_token_span.start;
         p.next_token();
         let exp = p.parse_nested_expression(Precedence::Lowest)?;
         if !p.expect_peek(p.peek_token.is_rparen()) {
             Err(p.make_syntax_error(Token::Rparen))
         } else {
-            Ok(exp)
+            Ok(Expression::Grouped(Box::new(
+                crate::ast::GroupedExpression {
+                    span: Span::new(start, p.cur_token_span.end),
+                    expression: exp,
+                },
+            )))
         }
     }
 

@@ -82,6 +82,13 @@ impl Error {
         self
     }
 
+    pub fn with_span_if_none(mut self, span: Span) -> Error {
+        if self.span.is_none() {
+            self.span = Some(span);
+        }
+        self
+    }
+
     pub fn with_stack(mut self, stack: &[CallFrame]) -> Error {
         if self.stack.is_empty() {
             self.stack = stack.to_vec();

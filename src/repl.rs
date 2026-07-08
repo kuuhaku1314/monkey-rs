@@ -1,9 +1,8 @@
-use crate::evaluator::eval;
+use crate::ast::{Program, Statement};
 use crate::lexer::new_lexer;
-use crate::object::new_env;
 use crate::parser::new_parser;
+use crate::vm::eval_vm;
 use std::io;
-use std::rc::Rc;
 
 pub const PROMPT: &str = ">> ";
 pub const CONTINUATION_PROMPT: &str = ".. ";
@@ -23,7 +22,7 @@ pub const MONKEY_FACE: &str = r#"            __,__
 
 pub fn start<R: io::BufRead, W: io::Write>(input: R, output: &mut W) {
     let mut scanner = input.lines();
-    let env = new_env();
+    let mut history = String::new();
     loop {
         write!(output, "{}", PROMPT).unwrap();
         output.flush().unwrap();
@@ -42,17 +41,56 @@ pub fn start<R: io::BufRead, W: io::Write>(input: R, output: &mut W) {
                 _ => return,
             }
         }
-        let mut p = new_parser(new_lexer(line.to_owned(), Some(String::from("repl"))));
+        let source = repl_source(history.as_str(), line.as_str());
+        let mut p = new_parser(new_lexer(source.to_owned(), Some(String::from("repl"))));
         match p.parse_program() {
-            Ok(ref program) => match eval(program, Rc::clone(&env)) {
-                Ok(v) => writeln!(output, "{}", v).unwrap(),
-                Err(e) => writeln!(output, "{}", e.render(&line, Some("repl"))).unwrap(),
+            Ok(ref program) => match eval_vm(program) {
+                Ok(v) => {
+                    if !v.is_empty() {
+                        writeln!(output, "{}", v).unwrap();
+                    }
+                    if should_persist_repl_input(program) {
+                        append_repl_history(&mut history, line.as_str());
+                    }
+                }
+                Err(e) => writeln!(output, "{}", e.render(&source, Some("repl"))).unwrap(),
             },
-            Err(err) => {
-                writeln!(output, "{MONKEY_FACE}\n{}", err.render(&line, Some("repl"))).unwrap()
-            }
+            Err(err) => writeln!(
+                output,
+                "{MONKEY_FACE}\n{}",
+                err.render(&source, Some("repl"))
+            )
+            .unwrap(),
         }
     }
+}
+
+fn repl_source(history: &str, line: &str) -> String {
+    if history.is_empty() {
+        line.to_string()
+    } else {
+        format!("{history}\n{line}")
+    }
+}
+
+fn append_repl_history(history: &mut String, line: &str) {
+    if !history.is_empty() {
+        history.push('\n');
+    }
+    history.push_str(line);
+}
+
+fn should_persist_repl_input(program: &Program) -> bool {
+    program.statements.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::Let(_)
+                | Statement::Struct(_)
+                | Statement::Import(_)
+                | Statement::Export(_)
+                | Statement::Assign(_)
+        )
+    })
 }
 
 fn needs_more_input(input: &str) -> bool {
@@ -97,7 +135,9 @@ fn needs_more_input(input: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::needs_more_input;
+    use super::{needs_more_input, should_persist_repl_input};
+    use crate::lexer::new_lexer;
+    use crate::parser::new_parser;
 
     #[test]
     fn multiline_detection_ignores_strings_and_comments() {
@@ -105,5 +145,18 @@ mod tests {
         assert!(!needs_more_input("fn f() {\n1\n}"));
         assert!(!needs_more_input("let s = \"{\";"));
         assert!(!needs_more_input("// {\n1"));
+    }
+
+    #[test]
+    fn repl_persists_bindings_but_not_plain_expressions() {
+        assert!(should_persist("let x = 1;"));
+        assert!(should_persist("x = x + 1;"));
+        assert!(!should_persist("x + 1"));
+        assert!(!should_persist("print(x);"));
+    }
+
+    fn should_persist(source: &str) -> bool {
+        let mut parser = new_parser(new_lexer(source.to_string(), Some("repl_test".to_string())));
+        should_persist_repl_input(&parser.parse_program().unwrap())
     }
 }

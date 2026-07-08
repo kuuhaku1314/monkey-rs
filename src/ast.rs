@@ -51,6 +51,7 @@ pub enum Expression {
     If(Box<IfExpression>),
     Infix(Box<InfixExpression>),
     Prefix(Box<PrefixExpression>),
+    Grouped(Box<GroupedExpression>),
     Slice(SliceLiteral),
     Map(MapLiteral),
     StructLiteral(StructLiteral),
@@ -72,6 +73,7 @@ impl Expression {
             Expression::If(v) => v.span,
             Expression::Infix(v) => v.span,
             Expression::Prefix(v) => v.span,
+            Expression::Grouped(v) => v.span,
             Expression::Slice(v) => v.span,
             Expression::Map(v) => v.span,
             Expression::StructLiteral(v) => v.span,
@@ -153,6 +155,12 @@ pub struct PrefixExpression {
     pub span: Span,
     pub token: Token,
     pub right: Expression,
+}
+
+#[derive(Clone)]
+pub struct GroupedExpression {
+    pub span: Span,
+    pub expression: Expression,
 }
 
 #[derive(Clone)]
