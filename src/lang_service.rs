@@ -2179,13 +2179,12 @@ fn collect_statement_named_functions(
                 }
             }
         }
-        Statement::ForIn(statement) => {
-            if span_contains_position(statement.body.span, position) {
+        Statement::ForIn(statement)
+            if span_contains_position(statement.body.span, position) => {
                 for statement in &statement.body.statements {
                     collect_statement_named_functions(statement, functions, position);
                 }
             }
-        }
         _ => {}
     }
 }
@@ -2482,8 +2481,8 @@ fn collect_statement_variable_shapes(
                 *variables = nested_variables;
             }
         }
-        Statement::ForIn(statement) => {
-            if span_contains_position(statement.body.span, position) {
+        Statement::ForIn(statement)
+            if span_contains_position(statement.body.span, position) => {
                 let mut loop_variables = variables.clone();
                 loop_variables.insert(statement.key.name.to_string(), ValueShape::Unknown);
                 if let Some(value) = &statement.value {
@@ -2500,7 +2499,6 @@ fn collect_statement_variable_shapes(
                 }
                 *variables = body_variables;
             }
-        }
         _ => {}
     }
 }
@@ -2952,8 +2950,8 @@ fn collect_statement_struct_field_definitions(
                 *fields = nested_fields;
             }
         }
-        Statement::ForIn(statement) => {
-            if span_contains_position(statement.body.span, position) {
+        Statement::ForIn(statement)
+            if span_contains_position(statement.body.span, position) => {
                 let mut nested_fields = fields.clone();
                 for statement in &statement.body.statements {
                     collect_statement_struct_field_definitions(
@@ -2965,7 +2963,6 @@ fn collect_statement_struct_field_definitions(
                 }
                 *fields = nested_fields;
             }
-        }
         _ => {}
     }
 }
@@ -3007,15 +3004,14 @@ fn collect_statement_struct_fields(
                 *fields = nested_fields;
             }
         }
-        Statement::ForIn(statement) => {
-            if span_contains_position(statement.body.span, position) {
+        Statement::ForIn(statement)
+            if span_contains_position(statement.body.span, position) => {
                 let mut nested_fields = fields.clone();
                 for statement in &statement.body.statements {
                     collect_statement_struct_fields(statement, &mut nested_fields, position);
                 }
                 *fields = nested_fields;
             }
-        }
         _ => {}
     }
 }
@@ -3078,8 +3074,8 @@ fn collect_statement_variable_struct_types(
                 *variables = nested_variables;
             }
         }
-        Statement::ForIn(statement) => {
-            if span_contains_position(statement.body.span, position) {
+        Statement::ForIn(statement)
+            if span_contains_position(statement.body.span, position) => {
                 let mut nested_variables = variables.clone();
                 for statement in &statement.body.statements {
                     collect_statement_variable_struct_types(
@@ -3090,7 +3086,6 @@ fn collect_statement_variable_struct_types(
                 }
                 *variables = nested_variables;
             }
-        }
         _ => {}
     }
 }

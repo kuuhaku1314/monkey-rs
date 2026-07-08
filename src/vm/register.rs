@@ -1081,7 +1081,7 @@ impl RegisterEmitter {
             HirInstruction::MakeMap(count, span) => {
                 let values = self.pop_many(*count * 2);
                 let mut entries = Vec::with_capacity(*count);
-                for pair in values.chunks_exact(2) {
+                for pair in values.as_chunks::<2>().0 {
                     entries.push((pair[0], pair[1]));
                 }
                 let dst = self.alloc();
